@@ -793,6 +793,90 @@ class ExpenseTypeTest {
     }
 
     @Test
+    fun twoMealAllowancesOnTheSameDayEachUseTheFullDefaultAmount() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val firstCalculation = calculateReceiptReimbursement(
+            amount = BigDecimal("25.00"),
+            expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+            trip = trip,
+            date = date,
+            previousReceipts = emptyList(),
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+        val firstAllowance = Receipt(
+            id = "first",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("25.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+            storedFileName = "",
+            mimeType = "",
+            reimbursableAmount = firstCalculation.reimbursableAmount
+        )
+
+        val secondCalculation = calculateReceiptReimbursement(
+            amount = BigDecimal("25.00"),
+            expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+            trip = trip,
+            date = date,
+            previousReceipts = listOf(firstAllowance),
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(BigDecimal("25.00"), firstCalculation.reimbursableAmount)
+        assertEquals(BigDecimal("25.00"), secondCalculation.reimbursableAmount)
+        assertEquals(BigDecimal.ZERO, secondCalculation.alreadyReimbursedAgainstQuota)
+        assertEquals(BigDecimal("50.00"), firstCalculation.reimbursableAmount + secondCalculation.reimbursableAmount)
+    }
+
+    @Test
+    fun twoMealAllowancesEachUseTheFullCustomizedAmount() {
+        assertEquals(
+            BigDecimal("31.50"),
+            calculateReceiptReimbursableAmount(
+                receiptAmount = BigDecimal("31.50"),
+                expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+                dailyMealAllowance = BigDecimal("45.00"),
+                alreadySpentForType = BigDecimal("31.50"),
+                customTypeLimit = BigDecimal("31.50")
+            )
+        )
+    }
+
+    @Test
+    fun dailyAllowanceCountsEveryMealAllowanceOccurrence() {
+        assertEquals(
+            BigDecimal("50.00"),
+            calculateDailyMealAllowance(
+                baseAllowance = BigDecimal("45.00"),
+                mealTypes = listOf(
+                    ExpenseType.MEAL_ALLOWANCE_PARIS,
+                    ExpenseType.MEAL_ALLOWANCE_PARIS
+                ),
+                customLimits = emptyMap()
+            )
+        )
+        assertEquals(
+            BigDecimal("20.00"),
+            calculateDailyMealAllowance(
+                baseAllowance = BigDecimal("40.00"),
+                mealTypes = listOf(ExpenseType.LUNCH, ExpenseType.LUNCH),
+                customLimits = emptyMap()
+            )
+        )
+    }
+
+    @Test
     fun combinedCalculationCanBeBetterEvenWhenTheTotalExceedsItsQuota() {
         val customLimits = mapOf(
             ExpenseType.LUNCH to BigDecimal("10.00"),

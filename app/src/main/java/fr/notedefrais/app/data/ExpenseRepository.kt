@@ -877,7 +877,7 @@ class ExpenseRepository(private val context: Context) {
         private const val KEY_MEAL_VOUCHER_EMPLOYER_CONTRIBUTION =
             "meal_voucher_employer_contribution"
         private const val KEY_LIMIT_POLICY_VERSION = "limit_policy_version"
-        private const val LIMIT_POLICY_VERSION = 4
+        private const val LIMIT_POLICY_VERSION = 5
         private val FILE_DATE = DateTimeFormatter.ISO_LOCAL_DATE
     }
 }

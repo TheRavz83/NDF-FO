@@ -613,7 +613,7 @@ fun convertToMoreAdvantageousMealAllowance(
         .filter { it.tripId == trip.id }
         .groupBy { it.date }
         .filterValues { dailyReceipts ->
-            if (dailyReceipts.any { it.expenseType.isMealAllowance }) {
+            if (dailyReceipts.any { it.generatedMealAllowance }) {
                 return@filterValues false
             }
             val structuredMeals = dailyReceipts.filter { it.expenseType.isStructuredMeal }
@@ -940,15 +940,21 @@ internal fun calculateReceiptReimbursement(
             alreadyReimbursedAgainstQuota = alreadySpentCombined
         )
     }
-    val alreadySpentForType = previousReceipts
-        .filter {
-            it.tripId == trip.id &&
-                it.date == date &&
-                it.expenseType == expenseType
-        }
-        .fold(BigDecimal.ZERO) { total, previous ->
-            total + previous.reimbursableAmount
-        }
+    val alreadySpentForType = if (expenseType.isMealAllowance) {
+        // Le meal allowance est un forfait par repas : deux lignes le même
+        // jour disposent chacune de leur forfait complet.
+        BigDecimal.ZERO
+    } else {
+        previousReceipts
+            .filter {
+                it.tripId == trip.id &&
+                    it.date == date &&
+                    it.expenseType == expenseType
+            }
+            .fold(BigDecimal.ZERO) { total, previous ->
+                total + previous.reimbursableAmount
+            }
+    }
     val alreadySpentForMeals = previousReceipts
         .filter {
             it.tripId == trip.id &&
@@ -965,6 +971,7 @@ internal fun calculateReceiptReimbursement(
         else -> null
     }
     val alreadyReimbursedAgainstQuota = when {
+        expenseType.isMealAllowance -> BigDecimal.ZERO
         configuredTypeLimit != null && expenseType.category == ExpenseCategory.MEAL ->
             alreadySpentForType
         configuredTypeLimit == null && expenseType.category == ExpenseCategory.MEAL ->
@@ -1034,12 +1041,17 @@ fun calculateReceiptReimbursableAmount(
     customTypeLimit: BigDecimal? = null
 ): BigDecimal {
     val typeLimit = customTypeLimit ?: expenseType.defaultLimit
+    val spentAgainstTypeLimit = if (expenseType.isMealAllowance) {
+        BigDecimal.ZERO
+    } else {
+        alreadySpentForType
+    }
     if (typeLimit != null) {
         return if (expenseType.category == ExpenseCategory.MEAL) {
             calculateReimbursableAmount(
                 receiptAmount = receiptAmount,
                 dailyAllowance = typeLimit,
-                alreadySpent = alreadySpentForType
+                alreadySpent = spentAgainstTypeLimit
             )
         } else {
             applyExpenseLimit(receiptAmount, typeLimit)
@@ -1061,14 +1073,17 @@ fun calculateDailyMealAllowance(
     mealTypes: List<ExpenseType>,
     customLimits: Map<ExpenseType, BigDecimal>
 ): BigDecimal {
-    val distinctMealTypes = mealTypes
-        .asSequence()
-        .filter { it.category == ExpenseCategory.MEAL }
-        .distinct()
-        .toList()
-    if (distinctMealTypes.isEmpty()) return baseAllowance
+    val configuredMealTypes = mealTypes.filter { it.category == ExpenseCategory.MEAL }
+    if (configuredMealTypes.isEmpty()) return baseAllowance
 
-    val limits = distinctMealTypes.map { type ->
+    val countedMealTypes = buildList {
+        addAll(configuredMealTypes.filterNot { it.isMealAllowance }.distinct())
+        // Contrairement aux autres types de repas, chaque occurrence de meal
+        // allowance représente un forfait autonome.
+        addAll(configuredMealTypes.filter { it.isMealAllowance })
+    }
+
+    val limits = countedMealTypes.map { type ->
         effectiveExpenseLimit(type, customLimits)
     }
     // Un type sans plafond propre continue d'utiliser le plafond journalier

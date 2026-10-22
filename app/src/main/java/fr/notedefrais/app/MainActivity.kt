@@ -2598,7 +2598,7 @@ private fun mealAllowanceReplacementAdvice(
             it.id != editingReceiptId &&
                 it.tripId == trip.id &&
                 it.date == date &&
-                (it.expenseType.isLunchDinner || it.expenseType.isMealAllowance)
+                it.expenseType.isLunchDinner
         }
     ) return null
     val allowanceType = trip.mealZone.mealAllowanceType()
