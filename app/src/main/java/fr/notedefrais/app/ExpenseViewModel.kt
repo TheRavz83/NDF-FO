@@ -14,6 +14,7 @@ import fr.notedefrais.app.data.SingleMealAllowanceSuggestion
 import fr.notedefrais.app.data.Trip
 import fr.notedefrais.app.data.TripStatus
 import fr.notedefrais.app.data.calculateDailyMealAllowance
+import fr.notedefrais.app.data.effectiveDailyMealAllowance
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,7 +38,10 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 startDate = startDate,
                 endDate = endDate,
                 mealZone = mealZone,
-                dailyMealAllowance = mealZone.dailyAllowance
+                dailyMealAllowance = effectiveDailyMealAllowance(
+                    mealZone,
+                    _state.value.customExpenseLimits
+                )
             ),
             _state.value
         )

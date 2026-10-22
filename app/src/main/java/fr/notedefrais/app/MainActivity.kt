@@ -116,6 +116,7 @@ import fr.notedefrais.app.data.Trip
 import fr.notedefrais.app.data.TripStatus
 import fr.notedefrais.app.data.calculateReceiptReimbursement
 import fr.notedefrais.app.data.dinnerType
+import fr.notedefrais.app.data.effectiveExpenseLimit
 import fr.notedefrais.app.data.forMealZone
 import fr.notedefrais.app.data.groupReceiptsForDisplay
 import fr.notedefrais.app.data.isCombinedMealCalculationBeneficial
@@ -1818,20 +1819,39 @@ private fun AddReceiptDialog(
     var ocrDateCandidates by remember(source.uri) {
         mutableStateOf<List<OcrDateCandidate>>(emptyList())
     }
+    val fixedAllowanceWithoutAttachment = source.uri == null && expenseType.isMealAllowance
+
+    LaunchedEffect(source.uri, expenseType, expenseLimits) {
+        if (fixedAllowanceWithoutAttachment) {
+            effectiveExpenseLimit(expenseType, expenseLimits)?.let { allowance ->
+                amount = allowance.toFrenchAmount()
+            }
+        }
+    }
 
     LaunchedEffect(date, category, receipts) {
-        if (category == ExpenseCategory.MEAL && expenseType.isLunchDinner) {
+        if (category == ExpenseCategory.MEAL) {
             val existingMeals = receipts.filter {
-                it.tripId == trip.id &&
-                    it.date == date &&
-                    (it.expenseType.isLunch || it.expenseType.isDinner)
+                it.tripId == trip.id && it.date == date
             }
-            if (existingMeals.isNotEmpty()) {
+            if (
+                expenseType.isLunchDinner &&
+                existingMeals.any {
+                    it.expenseType.isLunch ||
+                        it.expenseType.isDinner ||
+                        it.expenseType.isMealAllowance
+                }
+            ) {
                 expenseType = if (existingMeals.any { it.expenseType.isLunch }) {
                     trip.mealZone.dinnerType()
                 } else {
                     ExpenseType.LUNCH
                 }
+            } else if (
+                expenseType.isMealAllowance &&
+                existingMeals.any { it.expenseType.isLunchDinner }
+            ) {
+                expenseType = ExpenseType.LUNCH
             }
         }
     }
@@ -1912,8 +1932,24 @@ private fun AddReceiptDialog(
                     )
                 }
                 OutlinedTextField(
-                    value = amount, onValueChange = { amount = it },
-                    label = { Text("Montant TTC (€)") }, singleLine = true,
+                    value = amount,
+                    onValueChange = { amount = it },
+                    label = {
+                        Text(
+                            if (fixedAllowanceWithoutAttachment) {
+                                "Montant du forfait (€)"
+                            } else {
+                                "Montant TTC (€)"
+                            }
+                        )
+                    },
+                    supportingText = if (fixedAllowanceWithoutAttachment) {
+                        { Text("Montant automatique selon le paramétrage du forfait.") }
+                    } else {
+                        null
+                    },
+                    enabled = !fixedAllowanceWithoutAttachment,
+                    singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
                 )
                 CalendarDateField(
@@ -2052,8 +2088,10 @@ private fun AddReceiptDialog(
     combinedAdvice?.let { (adviceDate, adviceAmount, adviceType) ->
         CombinedMealAdviceDialog(
             trip = trip,
-            combinedLimit = expenseLimits[trip.mealZone.lunchDinnerType()]
-                ?: trip.mealZone.dailyAllowance,
+            combinedLimit = effectiveExpenseLimit(
+                trip.mealZone.lunchDinnerType(),
+                expenseLimits
+            ) ?: trip.mealZone.dailyAllowance,
             onDismiss = { combinedAdvice = null },
             onApply = {
                 combinedAdvice = null
@@ -2086,21 +2124,41 @@ private fun EditReceiptDialog(
     var allowanceAdvice by remember(receipt.id) {
         mutableStateOf<MealAllowanceReplacementAdvice?>(null)
     }
+    val fixedAllowanceWithoutAttachment = !receipt.hasAttachment && expenseType.isMealAllowance
+
+    LaunchedEffect(receipt.id, expenseType, expenseLimits) {
+        if (fixedAllowanceWithoutAttachment) {
+            effectiveExpenseLimit(expenseType, expenseLimits)?.let { allowance ->
+                amount = allowance.toFrenchAmount()
+            }
+        }
+    }
 
     LaunchedEffect(date, category, receipts) {
-        if (category == ExpenseCategory.MEAL && expenseType.isLunchDinner) {
+        if (category == ExpenseCategory.MEAL) {
             val existingMeals = receipts.filter {
                 it.id != receipt.id &&
                     it.tripId == trip.id &&
-                    it.date == date &&
-                    (it.expenseType.isLunch || it.expenseType.isDinner)
+                    it.date == date
             }
-            if (existingMeals.isNotEmpty()) {
+            if (
+                expenseType.isLunchDinner &&
+                existingMeals.any {
+                    it.expenseType.isLunch ||
+                        it.expenseType.isDinner ||
+                        it.expenseType.isMealAllowance
+                }
+            ) {
                 expenseType = if (existingMeals.any { it.expenseType.isLunch }) {
                     trip.mealZone.dinnerType()
                 } else {
                     ExpenseType.LUNCH
                 }
+            } else if (
+                expenseType.isMealAllowance &&
+                existingMeals.any { it.expenseType.isLunchDinner }
+            ) {
+                expenseType = ExpenseType.LUNCH
             }
         }
     }
@@ -2150,7 +2208,21 @@ private fun EditReceiptDialog(
                         amount = it
                         error = null
                     },
-                    label = { Text("Montant TTC (€)") },
+                    label = {
+                        Text(
+                            if (fixedAllowanceWithoutAttachment) {
+                                "Montant du forfait (€)"
+                            } else {
+                                "Montant TTC (€)"
+                            }
+                        )
+                    },
+                    supportingText = if (fixedAllowanceWithoutAttachment) {
+                        { Text("Montant automatique selon le paramétrage du forfait.") }
+                    } else {
+                        null
+                    },
+                    enabled = !fixedAllowanceWithoutAttachment,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth()
@@ -2291,8 +2363,10 @@ private fun EditReceiptDialog(
     combinedAdvice?.let { (adviceDate, adviceAmount, adviceType) ->
         CombinedMealAdviceDialog(
             trip = trip,
-            combinedLimit = expenseLimits[trip.mealZone.lunchDinnerType()]
-                ?: trip.mealZone.dailyAllowance,
+            combinedLimit = effectiveExpenseLimit(
+                trip.mealZone.lunchDinnerType(),
+                expenseLimits
+            ) ?: trip.mealZone.dailyAllowance,
             onDismiss = { combinedAdvice = null },
             onApply = {
                 combinedAdvice = null
@@ -2359,6 +2433,18 @@ private fun ExpenseTypeDropdown(
             it.date == date &&
             (it.expenseType.isLunch || it.expenseType.isDinner)
     }
+    val hasLunchDinner = receipts.any {
+        it.id != editingReceiptId &&
+            it.tripId == trip.id &&
+            it.date == date &&
+            it.expenseType.isLunchDinner
+    }
+    val hasMealAllowance = receipts.any {
+        it.id != editingReceiptId &&
+            it.tripId == trip.id &&
+            it.date == date &&
+            it.expenseType.isMealAllowance
+    }
     val options = ExpenseType.forCategory(category)
         .filter { type ->
             if (category != ExpenseCategory.MEAL) {
@@ -2366,7 +2452,8 @@ private fun ExpenseTypeDropdown(
             } else {
                 val normalized = type.forMealZone(trip.mealZone)
                 normalized == type &&
-                    (!type.isLunchDinner || !hasSeparateMeal)
+                    (!type.isLunchDinner || (!hasSeparateMeal && !hasMealAllowance)) &&
+                    (!type.isMealAllowance || !hasLunchDinner)
             }
         }
 
@@ -2418,8 +2505,8 @@ private fun CombinedMealAdviceDialog(
         title = { Text("Calcul lunch + dinner plus avantageux") },
         text = {
             Text(
-                "Les plafonds séparés réduiraient le remboursement alors que le total reste " +
-                    "dans le plafond journalier de ${combinedLimit.euros()} " +
+                "Le calcul cumulé rembourse davantage que les plafonds séparés. " +
+                    "Le plafond journalier applicable est de ${combinedLimit.euros()} " +
                     "pour ${trip.mealZone.label}. Le calcul cumulé va être appliqué aux deux repas."
             )
         },
@@ -2447,6 +2534,14 @@ private fun shouldOfferCombinedCalculation(
     editingReceiptId: String? = null
 ): Boolean {
     if (!expenseType.isLunch && !expenseType.isDinner) return false
+    if (
+        receipts.any {
+            it.id != editingReceiptId &&
+                it.tripId == trip.id &&
+                it.date == date &&
+                it.expenseType.isMealAllowance
+        }
+    ) return false
 
     val normalizedType = expenseType.forMealZone(trip.mealZone)
     val entries = receipts
@@ -2498,6 +2593,14 @@ private fun mealAllowanceReplacementAdvice(
     editingReceiptId: String? = null
 ): MealAllowanceReplacementAdvice? {
     if (!expenseType.isStructuredMeal) return null
+    if (
+        receipts.any {
+            it.id != editingReceiptId &&
+                it.tripId == trip.id &&
+                it.date == date &&
+                (it.expenseType.isLunchDinner || it.expenseType.isMealAllowance)
+        }
+    ) return null
     val allowanceType = trip.mealZone.mealAllowanceType()
     val allowanceAmount = (expenseLimits[allowanceType] ?: allowanceType.defaultLimit)
         ?.takeIf { it.signum() > 0 }

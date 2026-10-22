@@ -43,9 +43,18 @@ data class Trip(
     }
 }
 
-fun Trip.withMealZone(zone: MealZone): Trip = copy(
+fun effectiveDailyMealAllowance(
+    zone: MealZone,
+    customLimits: Map<ExpenseType, BigDecimal>
+): BigDecimal = effectiveExpenseLimit(zone.lunchDinnerType(), customLimits)
+    ?: zone.dailyAllowance
+
+fun Trip.withMealZone(
+    zone: MealZone,
+    customLimits: Map<ExpenseType, BigDecimal> = emptyMap()
+): Trip = copy(
     mealZone = zone,
-    dailyMealAllowance = zone.dailyAllowance
+    dailyMealAllowance = effectiveDailyMealAllowance(zone, customLimits)
 )
 
 enum class ExpenseCategory(val label: String) {
@@ -342,6 +351,23 @@ fun effectiveExpenseLimit(
 }
 
 /**
+ * Un forfait saisi sans justificatif représente un droit fixe et non une
+ * dépense déclarée librement. Son montant est donc toujours celui du forfait
+ * effectif (personnalisé ou par défaut).
+ */
+fun normalizedExpenseAmount(
+    requestedAmount: BigDecimal,
+    expenseType: ExpenseType,
+    hasAttachment: Boolean,
+    customLimits: Map<ExpenseType, BigDecimal>
+): BigDecimal = if (!hasAttachment && expenseType.isMealAllowance) {
+    effectiveExpenseLimit(expenseType, customLimits)
+        ?: requestedAmount
+} else {
+    requestedAmount
+}
+
+/**
  * À la soumission, un dinner isolé qui dépasse son plafond est déclaré comme
  * Lunch + Dinner afin d'utiliser le plafond cumulé. Les justificatifs restent
  * distincts et seront regroupés par l'affichage et l'export.
@@ -361,11 +387,9 @@ fun convertOverLimitDinnerOnlyDays(
             val hasLunchOrCombined = dailyReceipts.any {
                 it.expenseType.isLunch || it.expenseType.isLunchDinner
             }
-            val hasGeneratedAllowance = dailyReceipts.any {
-                it.generatedMealAllowance
-            }
+            val hasMealAllowance = dailyReceipts.any { it.expenseType.isMealAllowance }
             val dinners = dailyReceipts.filter { it.expenseType.isDinner }
-            !hasLunchOrCombined && !hasGeneratedAllowance &&
+            !hasLunchOrCombined && !hasMealAllowance &&
                 dinners.isNotEmpty() &&
                 dinners.fold(BigDecimal.ZERO) { total, receipt -> total + receipt.amount } >
                 dinnerLimit
@@ -499,7 +523,7 @@ private fun singleMealAllowanceCandidates(
         .filter { it.tripId == trip.id }
         .groupBy { it.date }
         .mapNotNull { (date, dailyReceipts) ->
-            if (dailyReceipts.any { it.generatedMealAllowance }) return@mapNotNull null
+            if (dailyReceipts.any { it.expenseType.isMealAllowance }) return@mapNotNull null
             val enteredMeals = dailyReceipts.filter {
                 it.expenseType.isLunch || it.expenseType.isDinner
             }
@@ -583,24 +607,25 @@ fun convertToMoreAdvantageousMealAllowance(
 ): List<Receipt> {
     val allowanceType = trip.mealZone.mealAllowanceType()
     val allowanceAmount = effectiveExpenseLimit(allowanceType, customLimits)
+        ?.takeIf { it.signum() > 0 }
+        ?: return receipts
     val datesToConvert = receipts
         .filter { it.tripId == trip.id }
         .groupBy { it.date }
         .filterValues { dailyReceipts ->
-            if (dailyReceipts.any { it.generatedMealAllowance }) {
+            if (dailyReceipts.any { it.expenseType.isMealAllowance }) {
                 return@filterValues false
             }
-            if (
-                allowanceAmount != null &&
-                dailyReceipts.any {
-                    it.expenseType.isStructuredMeal && it.amount < allowanceAmount
-                }
-            ) {
+            val structuredMeals = dailyReceipts.filter { it.expenseType.isStructuredMeal }
+            // Un forfait remplace une seule dépense repas. Convertir plusieurs
+            // tickets créerait plusieurs lignes de forfait concurrentes pour
+            // la même journée et fausserait la comparaison.
+            if (structuredMeals.size != 1) {
+                return@filterValues false
+            }
+            if (structuredMeals.single().amount < allowanceAmount) {
                 // Ce cas est soumis au choix explicite de l'utilisateur lors
                 // de la saisie du repas ; la soumission ne doit pas l'écraser.
-                return@filterValues false
-            }
-            if (dailyReceipts.none { it.expenseType.isStructuredMeal }) {
                 return@filterValues false
             }
 
@@ -651,6 +676,8 @@ fun convertToMoreAdvantageousMealAllowance(
             receipt.copy(
                 category = allowanceType.category,
                 expenseType = allowanceType,
+                amount = allowanceAmount,
+                reimbursableAmount = allowanceAmount,
                 combinedMealCalculation = false
             )
         } else {
@@ -722,6 +749,82 @@ internal fun combineSeparateMealReceipts(
     }
 }
 
+/**
+ * Réévalue les Lunch et Dinner séparés avec les plafonds courants. Cette passe
+ * est également exécutée à la soumission afin qu'un changement de paramètres
+ * postérieur à la saisie ne conserve pas une stratégie devenue défavorable.
+ */
+fun combineAdvantageousSeparateMealDays(
+    receipts: List<Receipt>,
+    trip: Trip,
+    customLimits: Map<ExpenseType, BigDecimal>,
+    mealVoucherEmployerContribution: BigDecimal
+): List<Receipt> {
+    var optimized = receipts
+    receipts
+        .filter { it.tripId == trip.id }
+        .groupBy { it.date }
+        .toSortedMap()
+        .forEach { (date, dailyReceipts) ->
+            if (dailyReceipts.any { it.expenseType.isMealAllowance }) {
+                return@forEach
+            }
+            val entries = dailyReceipts
+                .filter { it.expenseType.isLunch || it.expenseType.isDinner }
+                .map { MealEntry(it.amount, it.expenseType.forMealZone(trip.mealZone)) }
+            if (
+                isCombinedMealCalculationBeneficial(
+                    entries = entries,
+                    zone = trip.mealZone,
+                    customLimits = customLimits,
+                    employerContribution = mealVoucherEmployerContribution
+                )
+            ) {
+                optimized = combineSeparateMealReceipts(
+                    receipts = optimized,
+                    tripId = trip.id,
+                    date = date,
+                    zone = trip.mealZone
+                )
+            }
+        }
+    return optimized
+}
+
+/** Applique dans un ordre stable toutes les règles repas de la soumission. */
+fun optimizeMealReceiptsForSubmission(
+    receipts: List<Receipt>,
+    trip: Trip,
+    customLimits: Map<ExpenseType, BigDecimal>,
+    mealVoucherEmployerContribution: BigDecimal,
+    acceptedAllowanceDates: Set<LocalDate> = emptySet()
+): List<Receipt> {
+    val combined = combineAdvantageousSeparateMealDays(
+        receipts = receipts,
+        trip = trip,
+        customLimits = customLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+    )
+    val withOptionalMissingAllowance = applySingleMealAllowanceStrategy(
+        receipts = combined,
+        trip = trip,
+        customLimits = customLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution,
+        acceptedAllowanceDates = acceptedAllowanceDates
+    )
+    val convertedDinner = convertOverLimitDinnerOnlyDays(
+        receipts = withOptionalMissingAllowance,
+        trip = trip,
+        customLimits = customLimits
+    )
+    return convertToMoreAdvantageousMealAllowance(
+        receipts = convertedDinner,
+        trip = trip,
+        customLimits = customLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+    )
+}
+
 data class MealEntry(
     val amount: BigDecimal,
     val expenseType: ExpenseType
@@ -753,7 +856,7 @@ fun isCombinedMealCalculationBeneficial(
         lunchTotal.coerceAtMost(lunchLimit) + dinnerTotal.coerceAtMost(dinnerLimit)
     val total = lunchTotal + dinnerTotal
     val combinedReimbursement = total.coerceAtMost(combinedLimit)
-    return total <= combinedLimit && combinedReimbursement > individualReimbursement
+    return combinedReimbursement > individualReimbursement
 }
 
 data class ExpenseState(

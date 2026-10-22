@@ -213,6 +213,51 @@ class ExpenseTypeTest {
     }
 
     @Test
+    fun newParisTripUsesTheConfiguredCumulatedAllowance() {
+        assertEquals(
+            BigDecimal("52.00"),
+            effectiveDailyMealAllowance(
+                zone = MealZone.PARIS_SOPHIA,
+                customLimits = mapOf(
+                    ExpenseType.LUNCH_DINNER_PARIS to BigDecimal("52.00")
+                )
+            )
+        )
+    }
+
+    @Test
+    fun dailyAllowanceUsesCustomizedLunchAndDinnerWhenNoCumulatedValueExists() {
+        assertEquals(
+            BigDecimal("47.00"),
+            effectiveDailyMealAllowance(
+                zone = MealZone.PARIS_SOPHIA,
+                customLimits = mapOf(
+                    ExpenseType.LUNCH to BigDecimal("21.00"),
+                    ExpenseType.DINNER_PARIS to BigDecimal("26.00")
+                )
+            )
+        )
+    }
+
+    @Test
+    fun changingZoneUsesTheConfiguredAllowanceForTheDestination() {
+        val date = LocalDate.of(2026, 7, 27)
+        val trip = Trip(
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+
+        val relocated = trip.withMealZone(
+            MealZone.PARIS_SOPHIA,
+            mapOf(ExpenseType.LUNCH_DINNER_PARIS to BigDecimal("51.00"))
+        )
+
+        assertEquals(BigDecimal("51.00"), relocated.dailyMealAllowance)
+    }
+
+    @Test
     fun combinedCalculationIsSuggestedWhenSeparateLimitWouldLoseMoney() {
         val beneficial = isCombinedMealCalculationBeneficial(
             entries = listOf(
@@ -240,7 +285,7 @@ class ExpenseTypeTest {
     }
 
     @Test
-    fun combinedCalculationIsNotSuggestedWhenDailyTotalExceedsCombinedLimit() {
+    fun combinedCalculationIsSuggestedAboveQuotaWhenItStillPaysMore() {
         val beneficial = isCombinedMealCalculationBeneficial(
             entries = listOf(
                 MealEntry(BigDecimal("30.00"), ExpenseType.LUNCH),
@@ -250,7 +295,7 @@ class ExpenseTypeTest {
             customLimits = emptyMap()
         )
 
-        assertEquals(false, beneficial)
+        assertTrue(beneficial)
     }
 
     @Test
@@ -689,6 +734,305 @@ class ExpenseTypeTest {
         )
 
         assertEquals(ExpenseType.MEAL_ALLOWANCE_COUNTRY, optimized.single().expenseType)
+        assertEquals(BigDecimal("48.00"), optimized.single().amount)
+        assertEquals(BigDecimal("48.00"), optimized.single().reimbursableAmount)
+    }
+
+    @Test
+    fun allowanceWithoutAttachmentAlwaysUsesItsConfiguredAmount() {
+        assertEquals(
+            BigDecimal("25.00"),
+            normalizedExpenseAmount(
+                requestedAmount = BigDecimal("1.00"),
+                expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+                hasAttachment = false,
+                customLimits = emptyMap()
+            )
+        )
+        assertEquals(
+            BigDecimal("31.50"),
+            normalizedExpenseAmount(
+                requestedAmount = BigDecimal("999.00"),
+                expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+                hasAttachment = false,
+                customLimits = mapOf(
+                    ExpenseType.MEAL_ALLOWANCE_PARIS to BigDecimal("31.50")
+                )
+            )
+        )
+    }
+
+    @Test
+    fun attachedAllowanceKeepsTheDeclaredReceiptAmount() {
+        assertEquals(
+            BigDecimal("18.00"),
+            normalizedExpenseAmount(
+                requestedAmount = BigDecimal("18.00"),
+                expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+                hasAttachment = true,
+                customLimits = mapOf(
+                    ExpenseType.MEAL_ALLOWANCE_PARIS to BigDecimal("31.50")
+                )
+            )
+        )
+    }
+
+    @Test
+    fun disabledAllowanceCannotKeepAnArbitraryManualAmount() {
+        assertEquals(
+            BigDecimal.ZERO,
+            normalizedExpenseAmount(
+                requestedAmount = BigDecimal("50.00"),
+                expenseType = ExpenseType.MEAL_ALLOWANCE_COUNTRY,
+                hasAttachment = false,
+                customLimits = mapOf(
+                    ExpenseType.MEAL_ALLOWANCE_COUNTRY to BigDecimal.ZERO
+                )
+            )
+        )
+    }
+
+    @Test
+    fun combinedCalculationCanBeBetterEvenWhenTheTotalExceedsItsQuota() {
+        val customLimits = mapOf(
+            ExpenseType.LUNCH to BigDecimal("10.00"),
+            ExpenseType.DINNER_COUNTRY to BigDecimal("10.00"),
+            ExpenseType.LUNCH_DINNER_COUNTRY to BigDecimal("40.00")
+        )
+
+        assertTrue(
+            isCombinedMealCalculationBeneficial(
+                entries = listOf(
+                    MealEntry(BigDecimal("30.00"), ExpenseType.LUNCH),
+                    MealEntry(BigDecimal("30.00"), ExpenseType.DINNER_COUNTRY)
+                ),
+                zone = MealZone.PROVINCE,
+                customLimits = customLimits
+            )
+        )
+    }
+
+    @Test
+    fun severalStructuredMealsAreNeverDuplicatedAsMealAllowances() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val receipts = listOf(
+            Receipt(
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("35.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.LUNCH,
+                storedFileName = "lunch.pdf",
+                mimeType = "application/pdf"
+            ),
+            Receipt(
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("35.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.DINNER_COUNTRY,
+                storedFileName = "dinner.pdf",
+                mimeType = "application/pdf"
+            )
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = receipts,
+            trip = trip,
+            customLimits = mapOf(
+                ExpenseType.MEAL_ALLOWANCE_COUNTRY to BigDecimal("50.00")
+            ),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(
+            listOf(ExpenseType.LUNCH, ExpenseType.DINNER_COUNTRY),
+            optimized.map { it.expenseType }
+        )
+    }
+
+    @Test
+    fun submissionReevaluatesSeparateMealsWithTheLatestLimits() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val receipts = listOf(
+            Receipt(
+                id = "lunch",
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("30.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.LUNCH,
+                storedFileName = "lunch.pdf",
+                mimeType = "application/pdf"
+            ),
+            Receipt(
+                id = "dinner",
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("30.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.DINNER_COUNTRY,
+                storedFileName = "dinner.pdf",
+                mimeType = "application/pdf"
+            )
+        )
+
+        val optimized = optimizeMealReceiptsForSubmission(
+            receipts = receipts,
+            trip = trip,
+            customLimits = mapOf(
+                ExpenseType.LUNCH to BigDecimal("10.00"),
+                ExpenseType.DINNER_COUNTRY to BigDecimal("10.00"),
+                ExpenseType.LUNCH_DINNER_COUNTRY to BigDecimal("40.00")
+            ),
+            mealVoucherEmployerContribution = BigDecimal.ZERO
+        )
+
+        assertEquals(2, optimized.size)
+        assertTrue(optimized.all { it.expenseType == ExpenseType.LUNCH_DINNER_COUNTRY })
+        assertEquals(listOf("lunch", "dinner"), optimized.map { it.id })
+    }
+
+    @Test
+    fun submissionChoosesAllowanceWithItsExactAmountWhenItWins() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val optimized = optimizeMealReceiptsForSubmission(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        ).single()
+
+        assertEquals(ExpenseType.MEAL_ALLOWANCE_PARIS, optimized.expenseType)
+        assertEquals(BigDecimal("25.00"), optimized.amount)
+    }
+
+    @Test
+    fun submissionKeepsCombinedMealWhenItBeatsTheAllowance() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val optimized = optimizeMealReceiptsForSubmission(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal.ZERO
+        ).single()
+
+        assertEquals(ExpenseType.LUNCH_DINNER_PARIS, optimized.expenseType)
+        assertEquals(BigDecimal("30.00"), optimized.amount)
+    }
+
+    @Test
+    fun mealAllowancePreventsLunchAndDinnerFromBeingCombined() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val receipts = listOf(
+            Receipt(
+                id = "lunch",
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("30.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.LUNCH,
+                storedFileName = "lunch.pdf",
+                mimeType = "application/pdf"
+            ),
+            Receipt(
+                id = "dinner",
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("30.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.DINNER_COUNTRY,
+                storedFileName = "dinner.pdf",
+                mimeType = "application/pdf"
+            ),
+            Receipt(
+                id = "allowance",
+                tripId = trip.id,
+                date = date,
+                amount = BigDecimal("20.00"),
+                category = ExpenseCategory.MEAL,
+                expenseType = ExpenseType.MEAL_ALLOWANCE_COUNTRY,
+                storedFileName = "",
+                mimeType = "",
+                comment = "Forfait saisi manuellement"
+            )
+        )
+
+        val optimized = optimizeMealReceiptsForSubmission(
+            receipts = receipts,
+            trip = trip,
+            customLimits = mapOf(
+                ExpenseType.LUNCH to BigDecimal("10.00"),
+                ExpenseType.DINNER_COUNTRY to BigDecimal("10.00"),
+                ExpenseType.LUNCH_DINNER_COUNTRY to BigDecimal("40.00")
+            ),
+            mealVoucherEmployerContribution = BigDecimal.ZERO
+        )
+
+        assertEquals(
+            listOf(
+                ExpenseType.LUNCH,
+                ExpenseType.DINNER_COUNTRY,
+                ExpenseType.MEAL_ALLOWANCE_COUNTRY
+            ),
+            optimized.map { it.expenseType }
+        )
+        assertEquals(false, optimized.any { it.expenseType.isLunchDinner })
     }
 
     @Test
