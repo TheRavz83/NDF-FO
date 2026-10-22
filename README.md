@@ -1,4 +1,4 @@
-# Fo Notes — application Android
+﻿# Fo Notes — application Android
 
 MVP Android natif pour classer des justificatifs par déplacement et suivre les
 droits repas au jour le jour.
@@ -74,7 +74,7 @@ Un fichier vide désactive la popup.
 ## Télécharger l'APK
 
 La dernière version de test est disponible directement dans le dépôt :
-[Fo Notes 1.24.0](releases/Fo-Notes-1.24.0.apk).
+[Fo Notes 1.25.0](releases/Fo-Notes-1.25.0.apk).
 
 ## Extension Chrome de diagnostic
 
