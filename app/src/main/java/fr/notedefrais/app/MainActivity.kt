@@ -84,6 +84,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -134,6 +135,9 @@ import fr.notedefrais.app.ocr.OcrDateCandidate
 import fr.notedefrais.app.ocr.ReceiptOcr
 import fr.notedefrais.app.remote.RemoteAnnouncement
 import java.io.File
+import fr.notedefrais.app.data.FiscalHorsepower
+import fr.notedefrais.app.remote.RouteDistance
+import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
@@ -1787,6 +1791,158 @@ private fun SourceDialog(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MileageTripSection(onResult: (String?, String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var outFrom by remember { mutableStateOf("") }
+    var outTo by remember { mutableStateOf("") }
+    var backFrom by remember { mutableStateOf("") }
+    var backTo by remember { mutableStateOf("") }
+    var backEdited by remember { mutableStateOf(false) }
+    var horsepower by remember { mutableStateOf(FiscalHorsepower.THREE_OR_LESS) }
+    var horsepowerExpanded by remember { mutableStateOf(false) }
+    var route by remember { mutableStateOf<Triple<String, BigDecimal, BigDecimal>?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun publish(places: String, outward: BigDecimal, inward: BigDecimal, power: FiscalHorsepower) {
+        val total = outward + inward
+        onResult(
+            power.amountFor(total).toFrenchAmount(),
+            "$places ${outward.toFrenchAmount()} km + ${inward.toFrenchAmount()} km = " +
+                "${total.toFrenchAmount()} km ; ${power.label}, " +
+                "${power.ratePerKm.toPlainString().replace('.', ',')} €/km"
+        )
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Trajet kilométrique", fontWeight = FontWeight.SemiBold, color = FoRed)
+        Text("Aller", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = outFrom,
+            onValueChange = {
+                outFrom = it
+                if (!backEdited) backTo = it
+            },
+            label = { Text("Départ aller (ex. Atos Aix)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = outTo,
+            onValueChange = {
+                outTo = it
+                if (!backEdited) backFrom = it
+            },
+            label = { Text("Arrivée aller (ex. Gare TGV Aix)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text("Retour", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = backFrom,
+            onValueChange = { backFrom = it; backEdited = true },
+            label = { Text("Départ retour (ex. Gare TGV Aix)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = backTo,
+            onValueChange = { backTo = it; backEdited = true },
+            label = { Text("Arrivée retour (ex. Atos Aix)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        ExposedDropdownMenuBox(
+            expanded = horsepowerExpanded,
+            onExpandedChange = { horsepowerExpanded = !horsepowerExpanded }
+        ) {
+            OutlinedTextField(
+                value = horsepower.label,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Puissance fiscale") },
+                supportingText = {
+                    Text(
+                        "Barème 2026 jusqu'à 5 000 km : " +
+                            "${horsepower.ratePerKm.toPlainString().replace('.', ',')} €/km"
+                    )
+                },
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = horsepowerExpanded)
+                },
+                modifier = Modifier.menuAnchor().fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = horsepowerExpanded,
+                onDismissRequest = { horsepowerExpanded = false }
+            ) {
+                FiscalHorsepower.entries.forEach { power ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "${power.label} — " +
+                                    "${power.ratePerKm.toPlainString().replace('.', ',')} €/km"
+                            )
+                        },
+                        onClick = {
+                            horsepower = power
+                            horsepowerExpanded = false
+                            route?.let { (places, outward, inward) ->
+                                publish(places, outward, inward, power)
+                            }
+                        }
+                    )
+                }
+            }
+        }
+        OutlinedButton(
+            enabled = !loading,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                val places = listOf(outFrom, outTo, backFrom, backTo).map { it.trim() }
+                if (places.any { it.isEmpty() }) {
+                    error = "Renseignez les quatre champs du trajet."
+                    return@OutlinedButton
+                }
+                error = null
+                route = null
+                loading = true
+                scope.launch {
+                    runCatching {
+                        val outward = RouteDistance.kilometers(places[0], places[1])
+                        val inward = RouteDistance.kilometers(places[2], places[3])
+                        outward to inward
+                    }.onSuccess { (outward, inward) ->
+                        val labels = "${places[0]} → ${places[1]} ; ${places[2]} → ${places[3]} :"
+                        route = Triple(labels, outward, inward)
+                        publish(labels, outward, inward, horsepower)
+                    }.onFailure {
+                        error = it.message ?: "Calcul impossible. Vérifiez la connexion."
+                    }
+                    loading = false
+                }
+            }
+        ) {
+            if (loading) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (loading) "Calcul en cours…" else "Calculer les kilomètres")
+        }
+        route?.let { (_, outward, inward) ->
+            Text(
+                "Aller ${outward.toFrenchAmount()} km + retour ${inward.toFrenchAmount()} km = " +
+                    "${(outward + inward).toFrenchAmount()} km",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+    }
+}
+
 @Composable
 private fun AddReceiptDialog(
     trip: Trip,
@@ -1986,6 +2142,14 @@ private fun AddReceiptDialog(
                     receipts = receipts,
                     onSelected = { expenseType = it }
                 )
+                if (expenseType == ExpenseType.MILEAGE_ALLOWANCES_BULL) {
+                    MileageTripSection(
+                        onResult = { amountText, description ->
+                            comment = description
+                            amountText?.let { amount = it }
+                        }
+                    )
+                }
                 OutlinedTextField(
                     value = comment,
                     onValueChange = { comment = it },
@@ -2247,6 +2411,14 @@ private fun EditReceiptDialog(
                     editingReceiptId = receipt.id,
                     onSelected = { expenseType = it }
                 )
+                if (expenseType == ExpenseType.MILEAGE_ALLOWANCES_BULL) {
+                    MileageTripSection(
+                        onResult = { amountText, description ->
+                            comment = description
+                            amountText?.let { amount = it }
+                        }
+                    )
+                }
                 OutlinedTextField(
                     value = comment,
                     onValueChange = { comment = it },
