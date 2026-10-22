@@ -1791,7 +1791,6 @@ private fun SourceDialog(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MileageTripSection(onResult: (String?, String) -> Unit) {
     val scope = rememberCoroutineScope()
