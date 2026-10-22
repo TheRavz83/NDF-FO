@@ -10,6 +10,7 @@ import fr.notedefrais.app.data.ExpenseState
 import fr.notedefrais.app.data.ExpenseType
 import fr.notedefrais.app.data.MealZone
 import fr.notedefrais.app.data.Receipt
+import fr.notedefrais.app.data.SingleMealAllowanceSuggestion
 import fr.notedefrais.app.data.Trip
 import fr.notedefrais.app.data.TripStatus
 import fr.notedefrais.app.data.calculateDailyMealAllowance
@@ -69,6 +70,25 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         _state.value = repository.deleteReceipt(receipt, _state.value)
     }
 
+    fun addReceiptWithoutAttachment(
+        trip: Trip,
+        date: LocalDate,
+        amount: BigDecimal,
+        expenseType: ExpenseType,
+        comment: String,
+        useCombinedMealCalculation: Boolean
+    ): Result<Unit> = runCatching {
+        _state.value = repository.addReceiptWithoutAttachment(
+            trip = trip,
+            date = date,
+            amount = amount,
+            expenseType = expenseType,
+            comment = comment,
+            useCombinedMealCalculation = useCombinedMealCalculation,
+            state = _state.value
+        )
+    }
+
     fun updateReceipt(
         receipt: Receipt,
         trip: Trip,
@@ -104,18 +124,33 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     fun updateTripTracking(
         tripId: String,
         status: TripStatus,
-        submittedDate: LocalDate?
+        submittedDate: LocalDate?,
+        acceptedMealAllowanceDates: Set<LocalDate> = emptySet()
     ): Result<Unit> = runCatching {
         _state.value = repository.updateTripTracking(
             tripId = tripId,
             status = status,
             submittedDate = submittedDate,
+            acceptedMealAllowanceDates = acceptedMealAllowanceDates,
             state = _state.value
         )
     }
 
-    fun prepareTripForSubmission(tripId: String): Result<List<Receipt>> = runCatching {
-        val updated = repository.prepareTripForSubmission(tripId, _state.value)
+    fun mealAllowanceSuggestions(
+        tripId: String
+    ): Result<List<SingleMealAllowanceSuggestion>> = runCatching {
+        repository.mealAllowanceSuggestions(tripId, _state.value)
+    }
+
+    fun prepareTripForSubmission(
+        tripId: String,
+        acceptedMealAllowanceDates: Set<LocalDate> = emptySet()
+    ): Result<List<Receipt>> = runCatching {
+        val updated = repository.prepareTripForSubmission(
+            tripId,
+            acceptedMealAllowanceDates,
+            _state.value
+        )
         _state.value = updated
         updated.receipts.filter { it.tripId == tripId }
     }

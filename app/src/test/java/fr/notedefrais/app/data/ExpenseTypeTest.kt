@@ -588,6 +588,37 @@ class ExpenseTypeTest {
     }
 
     @Test
+    fun submissionDoesNotOverrideDeclinedAllowanceForAReceiptBelowTheAllowance() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val lunch = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("12.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.LUNCH,
+            storedFileName = "lunch.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = listOf(lunch),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(ExpenseType.LUNCH, optimized.single().expenseType)
+        assertEquals(BigDecimal("12.00"), optimized.single().amount)
+    }
+
+    @Test
     fun submissionKeepsCombinedDinnerWhenZeroContributionMakesItMoreAdvantageous() {
         val date = LocalDate.of(2026, 10, 22)
         val trip = Trip(
@@ -685,7 +716,8 @@ class ExpenseTypeTest {
             receipts = listOf(lunch),
             trip = trip,
             customLimits = emptyMap(),
-            mealVoucherEmployerContribution = BigDecimal("6.00")
+            mealVoucherEmployerContribution = BigDecimal("6.00"),
+            acceptedAllowanceDates = setOf(date)
         )
 
         assertEquals(2, optimized.size)
@@ -722,7 +754,8 @@ class ExpenseTypeTest {
             receipts = listOf(dinner),
             trip = trip,
             customLimits = emptyMap(),
-            mealVoucherEmployerContribution = BigDecimal("6.00")
+            mealVoucherEmployerContribution = BigDecimal("6.00"),
+            acceptedAllowanceDates = setOf(date)
         )
 
         assertEquals(2, optimized.size)
@@ -731,6 +764,87 @@ class ExpenseTypeTest {
             optimized.single { it.generatedMealAllowance }
                 .comment.contains("Lunch manquant")
         )
+    }
+
+    @Test
+    fun advantageousMissingMealIsOnlyAddedAfterExplicitAcceptance() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val lunch = Receipt(
+            id = "lunch",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.LUNCH,
+            storedFileName = "lunch.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val suggestions = findSingleMealAllowanceSuggestions(
+            receipts = listOf(lunch),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+        val declined = applySingleMealAllowanceStrategy(
+            receipts = listOf(lunch),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(1, suggestions.size)
+        assertTrue(suggestions.single().reimbursementGain > BigDecimal.ZERO)
+        assertEquals("Dinner manquant", suggestions.single().missingMealLabel)
+        assertEquals(1, declined.size)
+        assertEquals(false, declined.single().generatedMealAllowance)
+        assertEquals(ExpenseType.LUNCH_DINNER_PARIS, declined.single().expenseType)
+    }
+
+    @Test
+    fun acceptedMissingMealKeepsTheOriginalReceiptType() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val lunch = Receipt(
+            id = "lunch",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.LUNCH,
+            storedFileName = "lunch.pdf",
+            mimeType = "application/pdf"
+        )
+        val accepted = applySingleMealAllowanceStrategy(
+            receipts = listOf(lunch),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00"),
+            acceptedAllowanceDates = setOf(date)
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = accepted,
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(ExpenseType.LUNCH, optimized.single { !it.generatedMealAllowance }.expenseType)
+        assertTrue(optimized.single { it.generatedMealAllowance }.expenseType.isMealAllowance)
     }
 
     @Test

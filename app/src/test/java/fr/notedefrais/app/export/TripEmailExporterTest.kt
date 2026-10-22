@@ -202,6 +202,32 @@ class TripEmailExporterTest {
     }
 
     @Test
+    fun manualExpenseWithoutAttachmentIsStillExported() {
+        val date = LocalDate.of(2026, 7, 21)
+        val manualExpense = Receipt(
+            id = "manual",
+            tripId = "trip",
+            date = date,
+            amount = BigDecimal("12.50"),
+            category = ExpenseType.TAXI.category,
+            expenseType = ExpenseType.TAXI,
+            storedFileName = "",
+            mimeType = "",
+            comment = "Taxi sans justificatif"
+        )
+
+        val names = buildAttachmentNames(listOf(manualExpense))
+        val lines = buildExportLines(listOf(manualExpense), names)
+
+        assertEquals(emptyMap<String, String>(), names)
+        assertEquals(1, lines.size)
+        assertEquals("Taxi sans justificatif", lines.single().description)
+        assertEquals(emptyList<String>(), lines.single().attachmentNames)
+        assertEquals(false, manualExpense.hasAttachment)
+        assertEquals(false, manualExpense.generatedMealAllowance)
+    }
+
+    @Test
     fun missingLunchAllowanceComesBeforeDinnerAndCountsInAttachmentPosition() {
         val date = LocalDate.of(2026, 7, 21)
         val dinner = receipt("dinner", date, ExpenseType.DINNER_PARIS)

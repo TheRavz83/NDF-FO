@@ -28,10 +28,7 @@ class ExpenseRepository(private val context: Context) {
             buildList {
                 for (index in 0 until array.length()) {
                     val receipt = array.getJSONObject(index).toReceipt()
-                    if (
-                        receipt.generatedMealAllowance ||
-                        File(receiptsDirectory, receipt.storedFileName).exists()
-                    ) {
+                    if (!receipt.hasAttachment || File(receiptsDirectory, receipt.storedFileName).exists()) {
                         add(receipt)
                     }
                 }
@@ -67,10 +64,11 @@ class ExpenseRepository(private val context: Context) {
         tripId: String,
         status: TripStatus,
         submittedDate: LocalDate?,
+        acceptedMealAllowanceDates: Set<LocalDate>,
         state: ExpenseState
     ): ExpenseState {
         val preparedState = if (status == TripStatus.SENT) {
-            prepareTripForSubmissionInternal(tripId, state)
+            prepareTripForSubmissionInternal(tripId, acceptedMealAllowanceDates, state)
         } else {
             state
         }
@@ -89,14 +87,37 @@ class ExpenseRepository(private val context: Context) {
         return updated
     }
 
-    fun prepareTripForSubmission(tripId: String, state: ExpenseState): ExpenseState {
-        val updated = prepareTripForSubmissionInternal(tripId, state)
+    fun mealAllowanceSuggestions(
+        tripId: String,
+        state: ExpenseState
+    ): List<SingleMealAllowanceSuggestion> {
+        val trip = state.trips.firstOrNull { it.id == tripId }
+            ?: error("Le déplacement est introuvable.")
+        return findSingleMealAllowanceSuggestions(
+            receipts = state.receipts,
+            trip = trip,
+            customLimits = state.customExpenseLimits,
+            mealVoucherEmployerContribution = state.mealVoucherEmployerContribution
+        )
+    }
+
+    fun prepareTripForSubmission(
+        tripId: String,
+        acceptedMealAllowanceDates: Set<LocalDate>,
+        state: ExpenseState
+    ): ExpenseState {
+        val updated = prepareTripForSubmissionInternal(
+            tripId,
+            acceptedMealAllowanceDates,
+            state
+        )
         persist(updated)
         return updated
     }
 
     private fun prepareTripForSubmissionInternal(
         tripId: String,
+        acceptedMealAllowanceDates: Set<LocalDate>,
         state: ExpenseState
     ): ExpenseState {
         val trip = state.trips.firstOrNull { it.id == tripId }
@@ -105,7 +126,8 @@ class ExpenseRepository(private val context: Context) {
             receipts = state.receipts,
             trip = trip,
             customLimits = state.customExpenseLimits,
-            mealVoucherEmployerContribution = state.mealVoucherEmployerContribution
+            mealVoucherEmployerContribution = state.mealVoucherEmployerContribution,
+            acceptedAllowanceDates = acceptedMealAllowanceDates
         )
         val dinnerConvertedReceipts = convertOverLimitDinnerOnlyDays(
             receipts = singleMealOptimizedReceipts,
@@ -297,6 +319,42 @@ class ExpenseRepository(private val context: Context) {
         }
     }
 
+    fun addReceiptWithoutAttachment(
+        trip: Trip,
+        date: LocalDate,
+        amount: BigDecimal,
+        expenseType: ExpenseType,
+        comment: String,
+        useCombinedMealCalculation: Boolean,
+        state: ExpenseState
+    ): ExpenseState {
+        require(!date.isBefore(trip.startDate) && !date.isAfter(trip.endDate))
+        require(amount > BigDecimal.ZERO)
+        val normalizedExpenseType = expenseType.forMealZone(trip.mealZone)
+        val receipt = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = amount,
+            category = normalizedExpenseType.category,
+            expenseType = normalizedExpenseType,
+            storedFileName = "",
+            mimeType = "",
+            comment = comment.trim(),
+            reimbursableAmount = amount
+        )
+        val withReceipt = state.copy(receipts = state.receipts + receipt)
+        val prepared = prepareMealDay(
+            state = withReceipt,
+            trip = trip,
+            date = date,
+            changedReceiptId = receipt.id,
+            useCombinedMealCalculation = useCombinedMealCalculation
+        )
+        val updated = recalculateTripDay(prepared, trip, date)
+        persist(updated)
+        return updated
+    }
+
     fun fileFor(receipt: Receipt): File = File(receiptsDirectory, receipt.storedFileName)
 
     fun updateReceipt(
@@ -309,7 +367,7 @@ class ExpenseRepository(private val context: Context) {
         useCombinedMealCalculation: Boolean,
         state: ExpenseState
     ): ExpenseState {
-        require(receipt.hasAttachment) {
+        require(!receipt.generatedMealAllowance) {
             "Une ligne Meal allowance automatique ne peut pas être modifiée directement."
         }
         require(state.receipts.any { it.id == receipt.id })
@@ -317,8 +375,10 @@ class ExpenseRepository(private val context: Context) {
         require(!date.isBefore(trip.startDate) && !date.isAfter(trip.endDate))
         require(amount > BigDecimal.ZERO)
 
-        val original = File(originalsDirectory, receipt.storedFileName)
-        require(original.exists()) { "Le justificatif original est introuvable." }
+        if (receipt.hasAttachment) {
+            val original = File(originalsDirectory, receipt.storedFileName)
+            require(original.exists()) { "Le justificatif original est introuvable." }
+        }
 
         val normalizedExpenseType = expenseType.forMealZone(trip.mealZone)
         val updatedReceipt = receipt.copy(
@@ -474,7 +534,7 @@ class ExpenseRepository(private val context: Context) {
                     val recalculated = receipt.copy(reimbursableAmount = reimbursableAmount)
                     recalculatedById[receipt.id] = recalculated
                     previousReceipts += recalculated
-                    if (receipt.generatedMealAllowance) return@forEach
+                    if (!receipt.hasAttachment) return@forEach
 
                     val original = File(originalsDirectory, receipt.storedFileName)
                     require(original.exists()) {
@@ -541,7 +601,7 @@ class ExpenseRepository(private val context: Context) {
                             )
                             recalculatedById[receipt.id] = recalculated
                             previousReceipts += recalculated
-                            if (receipt.generatedMealAllowance) return@forEach
+                            if (!receipt.hasAttachment) return@forEach
 
                             val original = File(originalsDirectory, receipt.storedFileName)
                             require(original.exists()) {

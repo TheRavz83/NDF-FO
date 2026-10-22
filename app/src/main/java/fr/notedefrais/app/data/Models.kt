@@ -172,14 +172,13 @@ data class Receipt(
     init {
         require(amount >= BigDecimal.ZERO)
         require(expenseType.category == category)
-        require(generatedMealAllowance || storedFileName.isNotBlank())
         require(!generatedMealAllowance || expenseType.isMealAllowance)
         require(reimbursableAmount >= BigDecimal.ZERO)
         require(reimbursableAmount <= amount)
     }
 
     val isCapped: Boolean get() = reimbursableAmount < amount
-    val hasAttachment: Boolean get() = !generatedMealAllowance
+    val hasAttachment: Boolean get() = storedFileName.isNotBlank()
 }
 
 data class ReceiptDisplayGroup(
@@ -392,55 +391,124 @@ fun convertOverLimitDinnerOnlyDays(
     }
 }
 
+data class SingleMealAllowanceSuggestion(
+    val date: LocalDate,
+    val missingMealLabel: String,
+    val allowanceAmount: BigDecimal,
+    val reimbursementWithAllowance: BigDecimal,
+    val reimbursementWithoutAddition: BigDecimal
+) {
+    val reimbursementGain: BigDecimal
+        get() = reimbursementWithAllowance - reimbursementWithoutAddition
+}
+
+private data class SingleMealAllowanceCandidate(
+    val suggestion: SingleMealAllowanceSuggestion?,
+    val enteredMeal: Receipt,
+    val fallbackReceipt: Receipt,
+    val generatedAllowance: Receipt
+)
+
 /**
- * Pour une journée avec un seul Lunch ou Dinner, compare deux stratégies :
- * convertir ce repas en Lunch + Dinner, ou conserver le repas et ajouter le
- * repas manquant sous forme de Meal allowance sans justificatif.
+ * Repère les journées où conserver le seul repas saisi et ajouter le repas
+ * manquant en Meal allowance serait plus avantageux que le cumul Lunch + Dinner.
+ * Cette fonction analyse uniquement : elle ne crée aucune ligne.
+ */
+fun findSingleMealAllowanceSuggestions(
+    receipts: List<Receipt>,
+    trip: Trip,
+    customLimits: Map<ExpenseType, BigDecimal>,
+    mealVoucherEmployerContribution: BigDecimal
+): List<SingleMealAllowanceSuggestion> = singleMealAllowanceCandidates(
+    receipts = receipts,
+    trip = trip,
+    customLimits = customLimits,
+    mealVoucherEmployerContribution = mealVoucherEmployerContribution
+).mapNotNull { it.suggestion }
+
+/**
+ * Applique la stratégie de soumission. Une Meal allowance sans justificatif
+ * n'est ajoutée que pour les dates explicitement acceptées par l'utilisateur.
+ * En cas de refus, le repas existant utilise la meilleure solution sans ajout
+ * (calcul Lunch + Dinner ou Meal allowance appliqué au justificatif existant).
  */
 fun applySingleMealAllowanceStrategy(
     receipts: List<Receipt>,
     trip: Trip,
     customLimits: Map<ExpenseType, BigDecimal>,
-    mealVoucherEmployerContribution: BigDecimal
+    mealVoucherEmployerContribution: BigDecimal,
+    acceptedAllowanceDates: Set<LocalDate> = emptySet()
 ): List<Receipt> {
-    val withoutGenerated = receipts.filterNot {
-        it.tripId == trip.id && it.generatedMealAllowance
+    val candidates = singleMealAllowanceCandidates(
+        receipts = receipts,
+        trip = trip,
+        customLimits = customLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+    )
+    if (candidates.isEmpty()) return receipts
+
+    val replacements = candidates.associate { candidate ->
+        candidate.enteredMeal.id to candidate.fallbackReceipt
     }
+    val additions = candidates
+        .filter { it.suggestion?.date in acceptedAllowanceDates }
+        .map { it.generatedAllowance }
+    val acceptedReceiptIds = candidates
+        .filter { it.suggestion?.date in acceptedAllowanceDates }
+        .mapTo(mutableSetOf()) { it.enteredMeal.id }
+
+    return receipts.map { receipt ->
+        if (receipt.id in acceptedReceiptIds) receipt else replacements[receipt.id] ?: receipt
+    } + additions
+}
+
+private fun singleMealAllowanceCandidates(
+    receipts: List<Receipt>,
+    trip: Trip,
+    customLimits: Map<ExpenseType, BigDecimal>,
+    mealVoucherEmployerContribution: BigDecimal
+): List<SingleMealAllowanceCandidate> {
     val allowanceType = trip.mealZone.mealAllowanceType()
     val allowanceAmount = effectiveExpenseLimit(allowanceType, customLimits)
         ?.takeIf { it.signum() > 0 }
-        ?: return withoutGenerated
-    val additions = mutableListOf<Receipt>()
-    val replacements = mutableMapOf<String, Receipt>()
+        ?: return emptyList()
 
     fun reimbursableTotal(dailyReceipts: List<Receipt>): BigDecimal {
         val previousReceipts = mutableListOf<Receipt>()
-        return dailyReceipts.fold(BigDecimal.ZERO) { total, receipt ->
-            val calculation = calculateReceiptReimbursement(
-                amount = receipt.amount,
-                expenseType = receipt.expenseType,
-                trip = trip,
-                date = receipt.date,
-                previousReceipts = previousReceipts,
-                customLimits = customLimits,
-                mealVoucherEmployerContribution = mealVoucherEmployerContribution,
-                combinedMealCalculation = receipt.combinedMealCalculation
-            )
-            previousReceipts += receipt.copy(
-                reimbursableAmount = calculation.reimbursableAmount
-            )
-            total + calculation.reimbursableAmount
-        }
+        return dailyReceipts
+            .filter { it.category == ExpenseCategory.MEAL }
+            .fold(BigDecimal.ZERO) { total, receipt ->
+                val calculation = calculateReceiptReimbursement(
+                    amount = receipt.amount,
+                    expenseType = receipt.expenseType,
+                    trip = trip,
+                    date = receipt.date,
+                    previousReceipts = previousReceipts,
+                    customLimits = customLimits,
+                    mealVoucherEmployerContribution = mealVoucherEmployerContribution,
+                    combinedMealCalculation = receipt.combinedMealCalculation
+                )
+                previousReceipts += receipt.copy(
+                    reimbursableAmount = calculation.reimbursableAmount
+                )
+                total + calculation.reimbursableAmount
+            }
     }
 
-    withoutGenerated
+    return receipts
         .filter { it.tripId == trip.id }
         .groupBy { it.date }
-        .forEach { (date, dailyReceipts) ->
+        .mapNotNull { (date, dailyReceipts) ->
+            if (dailyReceipts.any { it.generatedMealAllowance }) return@mapNotNull null
             val enteredMeals = dailyReceipts.filter {
                 it.expenseType.isLunch || it.expenseType.isDinner
             }
-            if (enteredMeals.size != 1) return@forEach
+            if (
+                enteredMeals.size != 1 ||
+                dailyReceipts.any { it.expenseType.isLunchDinner }
+            ) {
+                return@mapNotNull null
+            }
 
             val enteredMeal = enteredMeals.single()
             val combinedType = trip.mealZone.lunchDinnerType()
@@ -451,6 +519,17 @@ fun applySingleMealAllowanceStrategy(
             )
             val combinedScenario = dailyReceipts.map { receipt ->
                 if (receipt.id == enteredMeal.id) combinedReceipt else receipt
+            }
+            val currentReimbursement = reimbursableTotal(dailyReceipts)
+            val combinedReimbursement = reimbursableTotal(combinedScenario)
+            val fallbackReceipt: Receipt
+            val fallbackReimbursement: BigDecimal
+            if (combinedReimbursement > currentReimbursement) {
+                fallbackReceipt = combinedReceipt
+                fallbackReimbursement = combinedReimbursement
+            } else {
+                fallbackReceipt = enteredMeal
+                fallbackReimbursement = currentReimbursement
             }
             val missingMealLabel = if (enteredMeal.expenseType.isLunch) {
                 "Dinner manquant"
@@ -471,18 +550,25 @@ fun applySingleMealAllowanceStrategy(
                 generatedMealAllowance = true
             )
             val allowanceScenario = dailyReceipts + generatedAllowance
-
-            if (
-                reimbursableTotal(allowanceScenario) >
-                reimbursableTotal(combinedScenario)
-            ) {
-                additions += generatedAllowance
-            } else {
-                replacements[enteredMeal.id] = combinedReceipt
-            }
+            val allowanceReimbursement = reimbursableTotal(allowanceScenario)
+            SingleMealAllowanceCandidate(
+                suggestion = if (allowanceReimbursement > fallbackReimbursement) {
+                    SingleMealAllowanceSuggestion(
+                        date = date,
+                        missingMealLabel = missingMealLabel,
+                        allowanceAmount = allowanceAmount,
+                        reimbursementWithAllowance = allowanceReimbursement,
+                        reimbursementWithoutAddition = fallbackReimbursement
+                    )
+                } else {
+                    null
+                },
+                enteredMeal = enteredMeal,
+                fallbackReceipt = fallbackReceipt,
+                generatedAllowance = generatedAllowance
+            )
         }
-
-    return withoutGenerated.map { receipt -> replacements[receipt.id] ?: receipt } + additions
+        .sortedBy { it.enteredMeal.date }
 }
 
 /**
@@ -496,10 +582,24 @@ fun convertToMoreAdvantageousMealAllowance(
     mealVoucherEmployerContribution: BigDecimal
 ): List<Receipt> {
     val allowanceType = trip.mealZone.mealAllowanceType()
+    val allowanceAmount = effectiveExpenseLimit(allowanceType, customLimits)
     val datesToConvert = receipts
         .filter { it.tripId == trip.id }
         .groupBy { it.date }
         .filterValues { dailyReceipts ->
+            if (dailyReceipts.any { it.generatedMealAllowance }) {
+                return@filterValues false
+            }
+            if (
+                allowanceAmount != null &&
+                dailyReceipts.any {
+                    it.expenseType.isStructuredMeal && it.amount < allowanceAmount
+                }
+            ) {
+                // Ce cas est soumis au choix explicite de l'utilisateur lors
+                // de la saisie du repas ; la soumission ne doit pas l'écraser.
+                return@filterValues false
+            }
             if (dailyReceipts.none { it.expenseType.isStructuredMeal }) {
                 return@filterValues false
             }

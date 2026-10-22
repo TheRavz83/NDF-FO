@@ -55,6 +55,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
@@ -110,8 +111,10 @@ import fr.notedefrais.app.data.MealEntry
 import fr.notedefrais.app.data.MealZone
 import fr.notedefrais.app.data.Receipt
 import fr.notedefrais.app.data.ReceiptDisplayGroup
+import fr.notedefrais.app.data.SingleMealAllowanceSuggestion
 import fr.notedefrais.app.data.Trip
 import fr.notedefrais.app.data.TripStatus
+import fr.notedefrais.app.data.calculateReceiptReimbursement
 import fr.notedefrais.app.data.dinnerType
 import fr.notedefrais.app.data.forMealZone
 import fr.notedefrais.app.data.groupReceiptsForDisplay
@@ -122,6 +125,7 @@ import fr.notedefrais.app.data.isLunchDinner
 import fr.notedefrais.app.data.isMealAllowance
 import fr.notedefrais.app.data.isStructuredMeal
 import fr.notedefrais.app.data.lunchDinnerType
+import fr.notedefrais.app.data.mealAllowanceType
 import fr.notedefrais.app.data.receivesMealVoucherDeduction
 import fr.notedefrais.app.export.TripEmailExporter
 import fr.notedefrais.app.ocr.OcrAmountCandidate
@@ -240,6 +244,7 @@ private fun ExpenseApp(vm: ExpenseViewModel = viewModel()) {
             onTripClick = { selectedTripId = it.id },
             onCreateTrip = vm::createTrip,
             onOpenSettings = { showSettings = true },
+            onMealAllowanceSuggestions = vm::mealAllowanceSuggestions,
             onPrepareTripForSubmission = vm::prepareTripForSubmission,
             onUpdateTripTracking = vm::updateTripTracking,
             onUpdateTripMealZone = vm::updateTripMealZone,
@@ -255,8 +260,10 @@ private fun ExpenseApp(vm: ExpenseViewModel = viewModel()) {
             mealVoucherEmployerContribution = state.mealVoucherEmployerContribution,
             onBack = { selectedTripId = null },
             onAddReceipt = vm::addReceipt,
+            onAddReceiptWithoutAttachment = vm::addReceiptWithoutAttachment,
             onUpdateReceipt = vm::updateReceipt,
             onDeleteReceipt = vm::deleteReceipt,
+            onMealAllowanceSuggestions = vm::mealAllowanceSuggestions,
             onPrepareTripForSubmission = vm::prepareTripForSubmission,
             fileFor = vm::fileFor
         )
@@ -296,8 +303,9 @@ private fun TripsScreen(
     onTripClick: (Trip) -> Unit,
     onCreateTrip: (String, LocalDate, LocalDate, MealZone) -> Result<Unit>,
     onOpenSettings: () -> Unit,
-    onPrepareTripForSubmission: (String) -> Result<List<Receipt>>,
-    onUpdateTripTracking: (String, TripStatus, LocalDate?) -> Result<Unit>,
+    onMealAllowanceSuggestions: (String) -> Result<List<SingleMealAllowanceSuggestion>>,
+    onPrepareTripForSubmission: (String, Set<LocalDate>) -> Result<List<Receipt>>,
+    onUpdateTripTracking: (String, TripStatus, LocalDate?, Set<LocalDate>) -> Result<Unit>,
     onUpdateTripMealZone: (String, MealZone) -> Result<Unit>,
     onDeleteTrip: (String) -> Result<Unit>,
     fileFor: (Receipt) -> File
@@ -307,6 +315,55 @@ private fun TripsScreen(
     var tripToTrack by remember { mutableStateOf<Trip?>(null) }
     var tripToRelocate by remember { mutableStateOf<Trip?>(null) }
     var tripToDelete by remember { mutableStateOf<Trip?>(null) }
+    var pendingExport by remember {
+        mutableStateOf<Pair<Trip, List<SingleMealAllowanceSuggestion>>?>(null)
+    }
+    var pendingTracking by remember {
+        mutableStateOf<PendingTrackingUpdate?>(null)
+    }
+
+    fun exportTrip(trip: Trip, acceptedDates: Set<LocalDate>) {
+        onPrepareTripForSubmission(trip.id, acceptedDates)
+            .onSuccess { preparedReceipts ->
+                exportTripByEmail(context, trip, preparedReceipts, fileFor)
+            }
+            .onFailure { error ->
+                Toast.makeText(
+                    context,
+                    error.message ?: "Préparation de l’export impossible",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+    }
+
+    fun requestExport(trip: Trip) {
+        onMealAllowanceSuggestions(trip.id)
+            .onSuccess { suggestions ->
+                if (suggestions.isEmpty()) exportTrip(trip, emptySet())
+                else pendingExport = trip to suggestions
+            }
+            .onFailure { error ->
+                Toast.makeText(context, error.message ?: "Calcul impossible", Toast.LENGTH_LONG).show()
+            }
+    }
+
+    fun updateTracking(request: PendingTrackingUpdate, acceptedDates: Set<LocalDate>) {
+        onUpdateTripTracking(
+            request.trip.id,
+            request.status,
+            request.submittedDate,
+            acceptedDates
+        ).onSuccess {
+            pendingTracking = null
+            Toast.makeText(context, "Suivi mis à jour", Toast.LENGTH_SHORT).show()
+        }.onFailure {
+            Toast.makeText(
+                context,
+                it.message ?: "Mise à jour impossible",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
 
     Scaffold(
         containerColor = FoBackground,
@@ -357,24 +414,7 @@ private fun TripsScreen(
                         onTracking = { tripToTrack = trip },
                         onLocation = { tripToRelocate = trip },
                         onDelete = { tripToDelete = trip },
-                        onExport = {
-                            onPrepareTripForSubmission(trip.id)
-                                .onSuccess { preparedReceipts ->
-                                    exportTripByEmail(
-                                        context,
-                                        trip,
-                                        preparedReceipts,
-                                        fileFor
-                                    )
-                                }
-                                .onFailure { error ->
-                                    Toast.makeText(
-                                        context,
-                                        error.message ?: "Préparation de l’export impossible",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                        }
+                        onExport = { requestExport(trip) }
                     )
                 }
             }
@@ -395,19 +435,53 @@ private fun TripsScreen(
             trip = trip,
             onDismiss = { tripToTrack = null },
             onConfirm = { status, submittedDate ->
-                onUpdateTripTracking(trip.id, status, submittedDate)
-                    .onSuccess {
-                        tripToTrack = null
-                        Toast.makeText(context, "Suivi mis à jour", Toast.LENGTH_SHORT).show()
-                    }
-                    .onFailure {
-                        Toast.makeText(
-                            context,
-                            it.message ?: "Mise à jour impossible",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+                val request = PendingTrackingUpdate(trip, status, submittedDate)
+                if (status != TripStatus.SENT) {
+                    tripToTrack = null
+                    updateTracking(request, emptySet())
+                } else {
+                    onMealAllowanceSuggestions(trip.id)
+                        .onSuccess { suggestions ->
+                            tripToTrack = null
+                            if (suggestions.isEmpty()) {
+                                updateTracking(request, emptySet())
+                            } else {
+                                pendingTracking = request.copy(suggestions = suggestions)
+                            }
+                        }
+                        .onFailure {
+                            Toast.makeText(
+                                context,
+                                it.message ?: "Calcul impossible",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                }
             }
+        )
+    }
+
+    pendingExport?.let { (trip, suggestions) ->
+        MealAllowanceChoiceDialog(
+            suggestions = suggestions,
+            onDismiss = { pendingExport = null },
+            onAccept = { acceptedDates ->
+                pendingExport = null
+                exportTrip(trip, acceptedDates)
+            },
+            onDecline = {
+                pendingExport = null
+                exportTrip(trip, emptySet())
+            }
+        )
+    }
+
+    pendingTracking?.let { request ->
+        MealAllowanceChoiceDialog(
+            suggestions = request.suggestions,
+            onDismiss = { pendingTracking = null },
+            onAccept = { acceptedDates -> updateTracking(request, acceptedDates) },
+            onDecline = { updateTracking(request, emptySet()) }
         )
     }
 
@@ -820,9 +894,11 @@ private fun TripScreen(
     mealVoucherEmployerContribution: BigDecimal,
     onBack: () -> Unit,
     onAddReceipt: (Uri, Trip, LocalDate, BigDecimal, ExpenseType, String, String, Boolean) -> Result<Unit>,
+    onAddReceiptWithoutAttachment: (Trip, LocalDate, BigDecimal, ExpenseType, String, Boolean) -> Result<Unit>,
     onUpdateReceipt: (Receipt, Trip, LocalDate, BigDecimal, ExpenseType, String, Boolean) -> Result<Unit>,
     onDeleteReceipt: (Receipt) -> Unit,
-    onPrepareTripForSubmission: (String) -> Result<List<Receipt>>,
+    onMealAllowanceSuggestions: (String) -> Result<List<SingleMealAllowanceSuggestion>>,
+    onPrepareTripForSubmission: (String, Set<LocalDate>) -> Result<List<Receipt>>,
     fileFor: (Receipt) -> File
 ) {
     val context = LocalContext.current
@@ -831,6 +907,34 @@ private fun TripScreen(
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
     var receiptToEdit by remember { mutableStateOf<Receipt?>(null) }
     var receiptToDelete by remember { mutableStateOf<Receipt?>(null) }
+    var pendingExportSuggestions by remember {
+        mutableStateOf<List<SingleMealAllowanceSuggestion>?>(null)
+    }
+
+    fun exportTrip(acceptedDates: Set<LocalDate>) {
+        onPrepareTripForSubmission(trip.id, acceptedDates)
+            .onSuccess { preparedReceipts ->
+                exportTripByEmail(context, trip, preparedReceipts, fileFor)
+            }
+            .onFailure { error ->
+                Toast.makeText(
+                    context,
+                    error.message ?: "Préparation de l’export impossible",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+    }
+
+    fun requestExport() {
+        onMealAllowanceSuggestions(trip.id)
+            .onSuccess { suggestions ->
+                if (suggestions.isEmpty()) exportTrip(emptySet())
+                else pendingExportSuggestions = suggestions
+            }
+            .onFailure { error ->
+                Toast.makeText(context, error.message ?: "Calcul impossible", Toast.LENGTH_LONG).show()
+            }
+    }
 
     val documentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -920,24 +1024,7 @@ private fun TripScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = {
-                            onPrepareTripForSubmission(trip.id)
-                                .onSuccess { preparedReceipts ->
-                                    exportTripByEmail(
-                                        context,
-                                        trip,
-                                        preparedReceipts,
-                                        fileFor
-                                    )
-                                }
-                                .onFailure { error ->
-                                    Toast.makeText(
-                                        context,
-                                        error.message ?: "Préparation de l’export impossible",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                        },
+                        onClick = { requestExport() },
                         enabled = receipts.isNotEmpty()
                     ) {
                         Icon(Icons.Default.Email, contentDescription = "Exporter par e-mail")
@@ -947,7 +1034,7 @@ private fun TripScreen(
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { showSourceDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Ajouter un justificatif")
+                Icon(Icons.Default.Add, contentDescription = "Ajouter une dépense")
             }
         }
     ) { padding ->
@@ -973,6 +1060,21 @@ private fun TripScreen(
         }
     }
 
+    pendingExportSuggestions?.let { suggestions ->
+        MealAllowanceChoiceDialog(
+            suggestions = suggestions,
+            onDismiss = { pendingExportSuggestions = null },
+            onAccept = { acceptedDates ->
+                pendingExportSuggestions = null
+                exportTrip(acceptedDates)
+            },
+            onDecline = {
+                pendingExportSuggestions = null
+                exportTrip(emptySet())
+            }
+        )
+    }
+
     if (showSourceDialog) {
         SourceDialog(
             onDismiss = { showSourceDialog = false },
@@ -983,6 +1085,10 @@ private fun TripScreen(
             onFile = {
                 showSourceDialog = false
                 documentLauncher.launch(arrayOf("application/pdf", "image/*"))
+            },
+            onManual = {
+                showSourceDialog = false
+                pendingSource = PendingSource(uri = null, mimeType = "")
             }
         )
     }
@@ -996,16 +1102,26 @@ private fun TripScreen(
             mealVoucherEmployerContribution = mealVoucherEmployerContribution,
             onDismiss = { pendingSource = null },
             onConfirm = { date, amount, expenseType, comment, useCombinedCalculation ->
-                onAddReceipt(
-                    source.uri,
+                val result = source.uri?.let { uri ->
+                    onAddReceipt(
+                        uri,
+                        trip,
+                        date,
+                        amount,
+                        expenseType,
+                        source.mimeType,
+                        comment,
+                        useCombinedCalculation
+                    )
+                } ?: onAddReceiptWithoutAttachment(
                     trip,
                     date,
                     amount,
                     expenseType,
-                    source.mimeType,
                     comment,
                     useCombinedCalculation
                 )
+                result
                     .onSuccess {
                         pendingSource = null
                         Toast.makeText(context, "Justificatif enregistré", Toast.LENGTH_SHORT).show()
@@ -1200,7 +1316,7 @@ private fun CumulatedReceiptRow(
             Column(Modifier.weight(1f)) {
                 Text(primaryReceipt.expenseType.displayLabel, fontWeight = FontWeight.Medium)
                 Text(
-                    "${group.receipts.size} justificatifs regroupés",
+                    "${group.receipts.size} dépenses regroupées",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1232,12 +1348,12 @@ private fun CumulatedReceiptRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onOpen(receipt) }
+                    .clickable(enabled = receipt.hasAttachment) { onOpen(receipt) }
                     .padding(start = 45.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    Icons.Default.InsertDriveFile,
+                    if (receipt.hasAttachment) Icons.Default.InsertDriveFile else Icons.Default.Add,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp)
@@ -1252,7 +1368,11 @@ private fun CumulatedReceiptRow(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        receipt.storedFileName,
+                        when {
+                            receipt.hasAttachment -> receipt.storedFileName
+                            receipt.generatedMealAllowance -> "Ajout automatique • sans justificatif"
+                            else -> "Saisie manuelle • sans justificatif"
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         fontSize = 11.sp,
@@ -1264,19 +1384,21 @@ private fun CumulatedReceiptRow(
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                IconButton(onClick = { onEdit(receipt) }) {
-                    Icon(
-                        Icons.Default.MoreHoriz,
-                        contentDescription = "Modifier ce justificatif",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = { onDelete(receipt) }) {
-                    Icon(
-                        Icons.Default.DeleteOutline,
-                        contentDescription = "Supprimer ce justificatif",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                if (!receipt.generatedMealAllowance) {
+                    IconButton(onClick = { onEdit(receipt) }) {
+                        Icon(
+                            Icons.Default.MoreHoriz,
+                            contentDescription = "Modifier cette dépense",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { onDelete(receipt) }) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Supprimer cette dépense",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -1301,7 +1423,7 @@ private fun ReceiptRow(
             color = categoryColor(receipt.category),
             shape = RoundedCornerShape(10.dp),
             modifier = Modifier.clickable(
-                enabled = receipt.hasAttachment,
+                enabled = !receipt.generatedMealAllowance,
                 onClick = onEdit
             )
         ) {
@@ -1325,10 +1447,10 @@ private fun ReceiptRow(
                 )
             }
             Text(
-                if (receipt.hasAttachment) {
-                    receipt.storedFileName
-                } else {
-                    "Ajout automatique • sans justificatif"
+                when {
+                    receipt.hasAttachment -> receipt.storedFileName
+                    receipt.generatedMealAllowance -> "Ajout automatique • sans justificatif"
+                    else -> "Saisie manuelle • sans justificatif"
                 },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1350,7 +1472,7 @@ private fun ReceiptRow(
                 )
             }
         }
-        if (receipt.hasAttachment) {
+        if (!receipt.generatedMealAllowance) {
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Default.DeleteOutline,
@@ -1626,11 +1748,16 @@ private fun TripStatusDropdown(
 }
 
 @Composable
-private fun SourceDialog(onDismiss: () -> Unit, onCamera: () -> Unit, onFile: () -> Unit) {
+private fun SourceDialog(
+    onDismiss: () -> Unit,
+    onCamera: () -> Unit,
+    onFile: () -> Unit,
+    onManual: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.ReceiptLong, null) },
-        title = { Text("Ajouter un justificatif") },
+        title = { Text("Ajouter une dépense") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1645,6 +1772,11 @@ private fun SourceDialog(onDismiss: () -> Unit, onCamera: () -> Unit, onFile: ()
                     Icon(Icons.Default.UploadFile, null)
                     Spacer(Modifier.width(10.dp))
                     Text("Importer PDF ou image")
+                }
+                OutlinedButton(onClick = onManual, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, null)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Saisie sans justificatif")
                 }
             }
         },
@@ -1675,8 +1807,11 @@ private fun AddReceiptDialog(
     var combinedAdvice by remember {
         mutableStateOf<Triple<LocalDate, BigDecimal, ExpenseType>?>(null)
     }
-    var ocrLoading by remember(source.uri) { mutableStateOf(true) }
-    var ocrCompleted by remember(source.uri) { mutableStateOf(false) }
+    var allowanceAdvice by remember {
+        mutableStateOf<MealAllowanceReplacementAdvice?>(null)
+    }
+    var ocrLoading by remember(source.uri) { mutableStateOf(source.uri != null) }
+    var ocrCompleted by remember(source.uri) { mutableStateOf(source.uri == null) }
     var ocrCandidates by remember(source.uri) {
         mutableStateOf<List<OcrAmountCandidate>>(emptyList())
     }
@@ -1702,8 +1837,9 @@ private fun AddReceiptDialog(
     }
 
     LaunchedEffect(source.uri) {
+        val sourceUri = source.uri ?: return@LaunchedEffect
         runCatching {
-            ReceiptOcr.detect(context.applicationContext, source.uri, source.mimeType)
+            ReceiptOcr.detect(context.applicationContext, sourceUri, source.mimeType)
         }.onSuccess {
             ocrCandidates = it.amounts
             ocrDateCandidates = it.dates.filter { candidate ->
@@ -1715,9 +1851,33 @@ private fun AddReceiptDialog(
         ocrCompleted = true
     }
 
+    fun saveOrOfferCombined(
+        selectedDate: LocalDate,
+        selectedAmount: BigDecimal,
+        selectedType: ExpenseType
+    ) {
+        if (
+            shouldOfferCombinedCalculation(
+                receipts = receipts,
+                trip = trip,
+                date = selectedDate,
+                amount = selectedAmount,
+                expenseType = selectedType,
+                expenseLimits = expenseLimits,
+                mealVoucherEmployerContribution = mealVoucherEmployerContribution
+            )
+        ) {
+            combinedAdvice = Triple(selectedDate, selectedAmount, selectedType)
+        } else {
+            onConfirm(selectedDate, selectedAmount, selectedType, comment, false)
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Détails du justificatif") },
+        title = {
+            Text(if (source.uri == null) "Détails de la dépense" else "Détails du justificatif")
+        },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1725,19 +1885,32 @@ private fun AddReceiptDialog(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        if (source.mimeType == "application/pdf") Icons.Default.Description else Icons.Default.InsertDriveFile,
+                        when {
+                            source.uri == null -> Icons.Default.Add
+                            source.mimeType == "application/pdf" -> Icons.Default.Description
+                            else -> Icons.Default.InsertDriveFile
+                        },
                         null, tint = FoRed
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text(if (source.mimeType == "application/pdf") "Document PDF" else "Image", color = FoRed)
+                    Text(
+                        when {
+                            source.uri == null -> "Dépense sans justificatif"
+                            source.mimeType == "application/pdf" -> "Document PDF"
+                            else -> "Image"
+                        },
+                        color = FoRed
+                    )
                 }
-                OcrAmountSelector(
-                    loading = ocrLoading,
-                    completed = ocrCompleted,
-                    candidates = ocrCandidates,
-                    selectedAmount = amount,
-                    onAmountSelected = { amount = it.toFrenchAmount() }
-                )
+                if (source.uri != null) {
+                    OcrAmountSelector(
+                        loading = ocrLoading,
+                        completed = ocrCompleted,
+                        candidates = ocrCandidates,
+                        selectedAmount = amount,
+                        onAmountSelected = { amount = it.toFrenchAmount() }
+                    )
+                }
                 OutlinedTextField(
                     value = amount, onValueChange = { amount = it },
                     label = { Text("Montant TTC (€)") }, singleLine = true,
@@ -1751,11 +1924,13 @@ private fun AddReceiptDialog(
                     maxDate = trip.endDate,
                     supportingText = "Entre ${trip.startDate.shortDateLabel()} et ${trip.endDate.shortDateLabel()}"
                 )
-                OcrDateSelector(
-                    candidates = ocrDateCandidates,
-                    selectedDate = date,
-                    onDateSelected = { date = it }
-                )
+                if (source.uri != null) {
+                    OcrDateSelector(
+                        candidates = ocrDateCandidates,
+                        selectedDate = date,
+                        onDateSelected = { date = it }
+                    )
+                }
                 ExpenseCategoryDropdown(
                     selected = category,
                     onSelected = {
@@ -1833,27 +2008,46 @@ private fun AddReceiptDialog(
                 }
                 if (error == null) {
                     val normalizedType = expenseType.forMealZone(trip.mealZone)
-                    if (
-                        shouldOfferCombinedCalculation(
-                            receipts = receipts,
-                            trip = trip,
-                            date = date,
-                            amount = parsedAmount!!,
-                            expenseType = normalizedType,
-                            expenseLimits = expenseLimits,
-                            mealVoucherEmployerContribution =
-                                mealVoucherEmployerContribution
-                        )
-                    ) {
-                        combinedAdvice = Triple(date, parsedAmount, normalizedType)
+                    val advice = mealAllowanceReplacementAdvice(
+                        receipts = receipts,
+                        trip = trip,
+                        date = date,
+                        amount = parsedAmount!!,
+                        expenseType = normalizedType,
+                        expenseLimits = expenseLimits,
+                        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+                    )
+                    if (advice != null) {
+                        allowanceAdvice = advice
                     } else {
-                        onConfirm(date, parsedAmount, normalizedType, comment, false)
+                        saveOrOfferCombined(date, parsedAmount, normalizedType)
                     }
                 }
             }) { Text("Enregistrer") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }
     )
+
+    allowanceAdvice?.let { advice ->
+        MealAllowanceReplacementDialog(
+            advice = advice,
+            onDismiss = { allowanceAdvice = null },
+            onAccept = {
+                allowanceAdvice = null
+                onConfirm(
+                    advice.date,
+                    advice.allowanceAmount,
+                    advice.allowanceType,
+                    comment,
+                    false
+                )
+            },
+            onDecline = {
+                allowanceAdvice = null
+                saveOrOfferCombined(advice.date, advice.originalAmount, advice.originalType)
+            }
+        )
+    }
 
     combinedAdvice?.let { (adviceDate, adviceAmount, adviceType) ->
         CombinedMealAdviceDialog(
@@ -1889,6 +2083,9 @@ private fun EditReceiptDialog(
     var combinedAdvice by remember(receipt.id) {
         mutableStateOf<Triple<LocalDate, BigDecimal, ExpenseType>?>(null)
     }
+    var allowanceAdvice by remember(receipt.id) {
+        mutableStateOf<MealAllowanceReplacementAdvice?>(null)
+    }
 
     LaunchedEffect(date, category, receipts) {
         if (category == ExpenseCategory.MEAL && expenseType.isLunchDinner) {
@@ -1905,6 +2102,29 @@ private fun EditReceiptDialog(
                     ExpenseType.LUNCH
                 }
             }
+        }
+    }
+
+    fun saveOrOfferCombined(
+        selectedDate: LocalDate,
+        selectedAmount: BigDecimal,
+        selectedType: ExpenseType
+    ) {
+        if (
+            shouldOfferCombinedCalculation(
+                receipts = receipts,
+                trip = trip,
+                date = selectedDate,
+                amount = selectedAmount,
+                expenseType = selectedType,
+                expenseLimits = expenseLimits,
+                mealVoucherEmployerContribution = mealVoucherEmployerContribution,
+                editingReceiptId = receipt.id
+            )
+        ) {
+            combinedAdvice = Triple(selectedDate, selectedAmount, selectedType)
+        } else {
+            onConfirm(selectedDate, selectedAmount, selectedType, comment, false)
         }
     }
 
@@ -2022,22 +2242,20 @@ private fun EditReceiptDialog(
                 }
                 if (error == null) {
                     val normalizedType = expenseType.forMealZone(trip.mealZone)
-                    if (
-                        shouldOfferCombinedCalculation(
-                            receipts = receipts,
-                            trip = trip,
-                            date = date,
-                            amount = parsedAmount!!,
-                            expenseType = normalizedType,
-                            expenseLimits = expenseLimits,
-                            mealVoucherEmployerContribution =
-                                mealVoucherEmployerContribution,
-                            editingReceiptId = receipt.id
-                        )
-                    ) {
-                        combinedAdvice = Triple(date, parsedAmount, normalizedType)
+                    val advice = mealAllowanceReplacementAdvice(
+                        receipts = receipts,
+                        trip = trip,
+                        date = date,
+                        amount = parsedAmount!!,
+                        expenseType = normalizedType,
+                        expenseLimits = expenseLimits,
+                        mealVoucherEmployerContribution = mealVoucherEmployerContribution,
+                        editingReceiptId = receipt.id
+                    )
+                    if (advice != null) {
+                        allowanceAdvice = advice
                     } else {
-                        onConfirm(date, parsedAmount, normalizedType, comment, false)
+                        saveOrOfferCombined(date, parsedAmount, normalizedType)
                     }
                 }
             }) {
@@ -2048,6 +2266,27 @@ private fun EditReceiptDialog(
             TextButton(onClick = onDismiss) { Text("Annuler") }
         }
     )
+
+    allowanceAdvice?.let { advice ->
+        MealAllowanceReplacementDialog(
+            advice = advice,
+            onDismiss = { allowanceAdvice = null },
+            onAccept = {
+                allowanceAdvice = null
+                onConfirm(
+                    advice.date,
+                    advice.allowanceAmount,
+                    advice.allowanceType,
+                    comment,
+                    false
+                )
+            },
+            onDecline = {
+                allowanceAdvice = null
+                saveOrOfferCombined(advice.date, advice.originalAmount, advice.originalType)
+            }
+        )
+    }
 
     combinedAdvice?.let { (adviceDate, adviceAmount, adviceType) ->
         CombinedMealAdviceDialog(
@@ -2233,6 +2472,219 @@ private fun shouldOfferCombinedCalculation(
         zone = trip.mealZone,
         customLimits = expenseLimits,
         employerContribution = mealVoucherEmployerContribution
+    )
+}
+
+private data class MealAllowanceReplacementAdvice(
+    val date: LocalDate,
+    val originalAmount: BigDecimal,
+    val originalType: ExpenseType,
+    val allowanceType: ExpenseType,
+    val allowanceAmount: BigDecimal,
+    val currentReimbursement: BigDecimal,
+    val allowanceReimbursement: BigDecimal
+) {
+    val gain: BigDecimal get() = allowanceReimbursement - currentReimbursement
+}
+
+private fun mealAllowanceReplacementAdvice(
+    receipts: List<Receipt>,
+    trip: Trip,
+    date: LocalDate,
+    amount: BigDecimal,
+    expenseType: ExpenseType,
+    expenseLimits: Map<ExpenseType, BigDecimal>,
+    mealVoucherEmployerContribution: BigDecimal,
+    editingReceiptId: String? = null
+): MealAllowanceReplacementAdvice? {
+    if (!expenseType.isStructuredMeal) return null
+    val allowanceType = trip.mealZone.mealAllowanceType()
+    val allowanceAmount = (expenseLimits[allowanceType] ?: allowanceType.defaultLimit)
+        ?.takeIf { it.signum() > 0 }
+        ?: return null
+    if (amount >= allowanceAmount) return null
+
+    val previousReceipts = receipts.filter {
+        it.id != editingReceiptId &&
+            it.tripId == trip.id &&
+            it.date == date
+    }
+    val currentReimbursement = calculateReceiptReimbursement(
+        amount = amount,
+        expenseType = expenseType,
+        trip = trip,
+        date = date,
+        previousReceipts = previousReceipts,
+        customLimits = expenseLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+    ).reimbursableAmount
+    val allowanceReimbursement = calculateReceiptReimbursement(
+        amount = allowanceAmount,
+        expenseType = allowanceType,
+        trip = trip,
+        date = date,
+        previousReceipts = previousReceipts,
+        customLimits = expenseLimits,
+        mealVoucherEmployerContribution = mealVoucherEmployerContribution
+    ).reimbursableAmount
+    if (allowanceReimbursement <= currentReimbursement) return null
+
+    return MealAllowanceReplacementAdvice(
+        date = date,
+        originalAmount = amount,
+        originalType = expenseType,
+        allowanceType = allowanceType,
+        allowanceAmount = allowanceAmount,
+        currentReimbursement = currentReimbursement,
+        allowanceReimbursement = allowanceReimbursement
+    )
+}
+
+@Composable
+private fun MealAllowanceReplacementDialog(
+    advice: MealAllowanceReplacementAdvice,
+    onDismiss: () -> Unit,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Restaurant, contentDescription = null, tint = FoRed) },
+        title = { Text("Meal allowance plus avantageux") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Le repas saisi est de ${advice.originalAmount.euros()}, alors que le " +
+                        "meal allowance disponible est de ${advice.allowanceAmount.euros()}."
+                )
+                Text(
+                    "En conservant le ticket : ${advice.currentReimbursement.euros()} remboursables."
+                )
+                Text(
+                    "En utilisant ${advice.allowanceType.displayLabel} : " +
+                        "${advice.allowanceReimbursement.euros()}, soit +${advice.gain.euros()}.",
+                    color = FoDarkRed,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "Le remplacement est facultatif.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAccept) { Text("Utiliser le meal allowance") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) { Text("Conserver le repas saisi") }
+        }
+    )
+}
+
+@Composable
+private fun MealAllowanceChoiceDialog(
+    suggestions: List<SingleMealAllowanceSuggestion>,
+    onDismiss: () -> Unit,
+    onAccept: (Set<LocalDate>) -> Unit,
+    onDecline: () -> Unit
+) {
+    val plural = suggestions.size > 1
+    var selectedDates by remember(suggestions) {
+        mutableStateOf<Set<LocalDate>>(suggestions.mapTo(mutableSetOf()) { it.date })
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(Icons.Default.Restaurant, contentDescription = null, tint = FoRed)
+        },
+        title = {
+            Text(if (plural) "Ajouter des repas sans justificatif ?" else "Ajouter un repas sans justificatif ?")
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Cet ajout est facultatif. Fo Notes le propose uniquement parce qu’il " +
+                        "augmente le remboursement estimé."
+                )
+                suggestions.forEach { suggestion ->
+                    val missingMeal = if (suggestion.missingMealLabel.startsWith("Lunch")) {
+                        "déjeuner manquant"
+                    } else {
+                        "dîner manquant"
+                    }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = if (plural) {
+                            Modifier.clickable {
+                                selectedDates = if (suggestion.date in selectedDates) {
+                                    selectedDates - suggestion.date
+                                } else {
+                                    selectedDates + suggestion.date
+                                }
+                            }
+                        } else {
+                            Modifier
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            if (plural) {
+                                Checkbox(
+                                    checked = suggestion.date in selectedDates,
+                                    onCheckedChange = null
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    "${suggestion.date.shortDateLabel()} — $missingMeal",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Sans ajout : ${suggestion.reimbursementWithoutAddition.euros()} remboursables."
+                                )
+                                Text(
+                                    "Avec le repas manquant en meal allowance de " +
+                                        "${suggestion.allowanceAmount.euros()} : " +
+                                        "${suggestion.reimbursementWithAllowance.euros()}, soit " +
+                                        "+${suggestion.reimbursementGain.euros()}.",
+                                    color = FoDarkRed,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "Aucune facturette ne sera associée au repas ajouté.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onAccept(
+                        if (plural) selectedDates else setOf(suggestions.single().date)
+                    )
+                }
+            ) {
+                Text(if (plural) "Continuer avec la sélection" else "Ajouter le repas")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) {
+                Text("Continuer sans ajout")
+            }
+        }
     )
 }
 
@@ -2438,7 +2890,14 @@ private fun CalendarDateField(
     }
 }
 
-private data class PendingSource(val uri: Uri, val mimeType: String)
+private data class PendingSource(val uri: Uri?, val mimeType: String)
+
+private data class PendingTrackingUpdate(
+    val trip: Trip,
+    val status: TripStatus,
+    val submittedDate: LocalDate?,
+    val suggestions: List<SingleMealAllowanceSuggestion> = emptyList()
+)
 
 private fun exportTripByEmail(
     context: android.content.Context,
