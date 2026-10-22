@@ -5,6 +5,7 @@ import fr.notedefrais.app.data.Receipt
 import fr.notedefrais.app.data.Trip
 import fr.notedefrais.app.data.MealZone
 import fr.notedefrais.app.data.combineSeparateMealReceipts
+import fr.notedefrais.app.data.isMealAllowance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -105,12 +106,36 @@ class TripEmailExporterTest {
 
         assertTrue(
             csv.contains(
-                "Date;Code;Libellé;Montant TTC;Montant remboursable;" +
+                "Date;Code;Libellé;Nombre d'items;Montant TTC;Montant remboursable;" +
                     "Commentaire / Description;Pièce jointe"
             )
         )
         assertTrue(csv.contains("01 06 Lunch — 2026-07-22.pdf"))
         assertTrue(Regex("2026-07-22.*\\R\\R2026-07-23", RegexOption.DOT_MATCHES_ALL).containsMatchIn(csv))
+    }
+
+    @Test
+    fun hotelUsesInclusiveTripDayCountAsItemCount() {
+        val trip = Trip(
+            name = "Paris",
+            startDate = LocalDate.of(2026, 7, 21),
+            endDate = LocalDate.of(2026, 7, 23)
+        )
+        val hotel = receipt(
+            id = "hotel",
+            date = trip.endDate,
+            type = ExpenseType.HOTEL_PARIS_SOPHIA,
+            amount = BigDecimal("450.00")
+        )
+
+        val line = buildExportLines(
+            receipts = listOf(hotel),
+            attachmentNames = buildAttachmentNames(listOf(hotel)),
+            hotelItemCount = trip.inclusiveDayCount()
+        ).single()
+
+        assertEquals(3, line.itemCount)
+        assertTrue(buildCsv(trip, listOf(line)).contains(";3;450,00;"))
     }
 
     @Test
@@ -144,6 +169,63 @@ class TripEmailExporterTest {
         ).single()
 
         assertEquals("02 Taxi — 2026-07-21", line.description)
+    }
+
+    @Test
+    fun generatedMealAllowanceIsExportedWithoutAttachment() {
+        val date = LocalDate.of(2026, 7, 21)
+        val lunch = receipt("lunch", date, ExpenseType.LUNCH)
+        val allowance = Receipt(
+            id = "allowance",
+            tripId = "trip",
+            date = date,
+            amount = BigDecimal("25.00"),
+            category = ExpenseType.MEAL_ALLOWANCE_PARIS.category,
+            expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+            storedFileName = "",
+            mimeType = "",
+            comment = "Meal allowance automatique — Dinner manquant",
+            generatedMealAllowance = true
+        )
+        val receipts = listOf(lunch, allowance)
+        val names = buildAttachmentNames(receipts)
+
+        val lines = buildExportLines(receipts, names)
+
+        assertEquals(2, lines.size)
+        assertEquals(1, names.size)
+        assertEquals(emptyList<String>(), lines.single { it.expenseType.isMealAllowance }.attachmentNames)
+        assertEquals(
+            "01 06 Lunch — 2026-07-21.pdf",
+            names.getValue("lunch")
+        )
+    }
+
+    @Test
+    fun missingLunchAllowanceComesBeforeDinnerAndCountsInAttachmentPosition() {
+        val date = LocalDate.of(2026, 7, 21)
+        val dinner = receipt("dinner", date, ExpenseType.DINNER_PARIS)
+        val allowance = Receipt(
+            id = "allowance",
+            tripId = "trip",
+            date = date,
+            amount = BigDecimal("25.00"),
+            category = ExpenseType.MEAL_ALLOWANCE_PARIS.category,
+            expenseType = ExpenseType.MEAL_ALLOWANCE_PARIS,
+            storedFileName = "",
+            mimeType = "",
+            comment = "Meal allowance automatique — Lunch manquant",
+            generatedMealAllowance = true
+        )
+        val sorted = sortReceiptsForExport(listOf(dinner, allowance))
+
+        val names = buildAttachmentNames(sorted)
+
+        assertEquals(listOf("allowance", "dinner"), sorted.map { it.id })
+        assertEquals(
+            "02 06 Dinner Paris — 2026-07-21.pdf",
+            names.getValue("dinner")
+        )
     }
 
     @Test

@@ -89,6 +89,17 @@
     return `${label} — ${date}`;
   }
 
+  function inclusiveDayCount(startDate, endDate) {
+    const start = Date.parse(`${startDate}T00:00:00Z`);
+    const end = Date.parse(`${endDate}T00:00:00Z`);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 1;
+    return Math.floor((end - start) / 86400000) + 1;
+  }
+
+  function isHotelLabel(label) {
+    return /^07\s+hotel\b/.test(semanticText(label));
+  }
+
   function mergeCumulated(entries) {
     const merged = [];
     const positions = new Map();
@@ -158,6 +169,7 @@
           : amount,
         description: clean(descriptionMatch?.[1]) ||
           fallbackDescription(label, currentDate),
+        itemCount: 1,
         attachments: []
       });
     }
@@ -166,12 +178,18 @@
       throw new Error("Aucune ligne de dépense n’a été trouvée dans le mail.");
     }
 
+    const startDate = periodMatch?.[1] || entries[0].date;
+    const endDate = periodMatch?.[2] || entries.at(-1).date;
+    const hotelItemCount = inclusiveDayCount(startDate, endDate);
     return {
       source: "mail",
       tripName: clean(tripMatch?.[1]),
-      startDate: periodMatch?.[1] || entries[0].date,
-      endDate: periodMatch?.[2] || entries.at(-1).date,
-      entries: mergeCumulated(entries)
+      startDate,
+      endDate,
+      entries: mergeCumulated(entries).map((entry) => ({
+        ...entry,
+        itemCount: isHotelLabel(entry.label) ? hotelItemCount : 1
+      }))
     };
   }
 
@@ -234,6 +252,9 @@
     const dateColumn = column("Date");
     const codeColumn = column("Code");
     const labelColumn = column("Libellé");
+    const itemCountColumn = headers.findIndex((header) =>
+      header === "nombre d'items" || header === "nombre" || header === "items"
+    );
     const amountColumn = column("Montant TTC");
     const reimbursableColumn = column("Montant remboursable");
     const descriptionColumn = headers.findIndex((header) =>
@@ -243,6 +264,9 @@
       header.includes("piece jointe")
     );
 
+    const startDate = metadata.get("debut") || "";
+    const endDate = metadata.get("fin") || "";
+    const fallbackHotelItemCount = inclusiveDayCount(startDate, endDate);
     const entries = [];
     for (const row of rows.slice(headerIndex + 1)) {
       const date = clean(row[dateColumn]);
@@ -266,6 +290,9 @@
         amount,
         reimbursableAmount: reimbursable,
         description: description || fallbackDescription(label, date),
+        itemCount: itemCountColumn >= 0
+          ? Math.max(1, Number.parseInt(clean(row[itemCountColumn]), 10) || 1)
+          : (isHotelLabel(label) ? fallbackHotelItemCount : 1),
         attachments: attachmentColumn >= 0
           ? clean(row[attachmentColumn]).split(/\s*\|\s*/).filter(Boolean)
           : []
@@ -279,8 +306,8 @@
     return {
       source: "csv",
       tripName: metadata.get("deplacement") || "",
-      startDate: metadata.get("debut") || entries[0].date,
-      endDate: metadata.get("fin") || entries.at(-1).date,
+      startDate: startDate || entries[0].date,
+      endDate: endDate || entries.at(-1).date,
       entries: mergeCumulated(entries)
     };
   }

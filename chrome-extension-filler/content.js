@@ -48,7 +48,7 @@
           <div class="fo-table-wrap">
             <table>
               <thead>
-                <tr><th>Date</th><th>Type</th><th>Remboursable</th><th>Description ATOS</th></tr>
+                <tr><th>Date</th><th>Type</th><th>Items</th><th>Remboursable</th><th>Description ATOS</th></tr>
               </thead>
               <tbody id="fo-lines"></tbody>
             </table>
@@ -131,6 +131,7 @@
       for (const value of [
         entry.date,
         entry.label,
+        String(entry.itemCount || 1),
         `${parser.money(entry.reimbursableAmount)} €`,
         entry.description
       ]) {
@@ -234,7 +235,10 @@
   function findLabelField(doc, labelText) {
     const target = normalizeText(labelText);
     const label = [...doc.querySelectorAll("label")]
-      .find((node) => normalizeText(node.textContent) === target);
+      .find((node) => {
+        const text = normalizeText(node.textContent);
+        return text === target || text.replace(/\s*[:*]+\s*$/, "") === target;
+      });
     if (!label) return null;
     const id = label.getAttribute("for");
     const field = id ? doc.getElementById(id) : null;
@@ -537,6 +541,19 @@
     );
     setFieldValue(toDate, atosDate(entry.date));
     await pace(0.8);
+
+    if (/^07\s+hotel\b/i.test(parser.comparable(entry.label))) {
+      const number = await waitFor(
+        () => findLabelField(doc, "Number"),
+        "Champ « Number » introuvable pour la facture d'hôtel."
+      );
+      const itemCount = Math.max(1, entry.itemCount || 1);
+      setFieldValue(number, String(itemCount));
+      log(
+        `Durée hôtel : ${itemCount} jour(s) renseigné(s) dans « Number ».`
+      );
+      await pace(0.8);
+    }
 
     const description = await waitFor(
       () => findLabelField(doc, "Description"),

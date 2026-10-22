@@ -114,6 +114,12 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
+    fun prepareTripForSubmission(tripId: String): Result<List<Receipt>> = runCatching {
+        val updated = repository.prepareTripForSubmission(tripId, _state.value)
+        _state.value = updated
+        updated.receipts.filter { it.tripId == tripId }
+    }
+
     fun updateTripMealZone(tripId: String, mealZone: MealZone): Result<Unit> = runCatching {
         _state.value = repository.updateTripMealZone(
             tripId = tripId,

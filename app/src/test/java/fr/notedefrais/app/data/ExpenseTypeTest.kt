@@ -58,6 +58,68 @@ class ExpenseTypeTest {
     }
 
     @Test
+    fun customLunchLimitIsUsedForReimbursement() {
+        val customLimit = effectiveExpenseLimit(
+            expenseType = ExpenseType.LUNCH,
+            customLimits = mapOf(ExpenseType.LUNCH to BigDecimal("32.00"))
+        )
+        val reimbursable = calculateReceiptReimbursableAmount(
+            receiptAmount = BigDecimal("40.00"),
+            expenseType = ExpenseType.LUNCH,
+            dailyMealAllowance = BigDecimal("45.00"),
+            customTypeLimit = customLimit
+        )
+
+        assertEquals(BigDecimal("32.00"), reimbursable)
+    }
+
+    @Test
+    fun cumulatedMealInheritsCustomLunchAndDinnerLimits() {
+        val limit = effectiveExpenseLimit(
+            expenseType = ExpenseType.LUNCH_DINNER_PARIS,
+            customLimits = mapOf(
+                ExpenseType.LUNCH to BigDecimal("24.00"),
+                ExpenseType.DINNER_PARIS to BigDecimal("31.00")
+            )
+        )
+
+        assertEquals(BigDecimal("55.00"), limit)
+    }
+
+    @Test
+    fun inheritedCumulatedLimitIsUsedForReimbursement() {
+        val customLimits = mapOf(
+            ExpenseType.LUNCH to BigDecimal("24.00"),
+            ExpenseType.DINNER_PARIS to BigDecimal("31.00")
+        )
+        val reimbursable = calculateReceiptReimbursableAmount(
+            receiptAmount = BigDecimal("70.00"),
+            expenseType = ExpenseType.LUNCH_DINNER_PARIS,
+            dailyMealAllowance = BigDecimal("45.00"),
+            customTypeLimit = effectiveExpenseLimit(
+                ExpenseType.LUNCH_DINNER_PARIS,
+                customLimits
+            )
+        )
+
+        assertEquals(BigDecimal("55.00"), reimbursable)
+    }
+
+    @Test
+    fun explicitCumulatedLimitOverridesCustomLunchAndDinnerLimits() {
+        val limit = effectiveExpenseLimit(
+            expenseType = ExpenseType.LUNCH_DINNER_PARIS,
+            customLimits = mapOf(
+                ExpenseType.LUNCH to BigDecimal("24.00"),
+                ExpenseType.DINNER_PARIS to BigDecimal("31.00"),
+                ExpenseType.LUNCH_DINNER_PARIS to BigDecimal("52.00")
+            )
+        )
+
+        assertEquals(BigDecimal("52.00"), limit)
+    }
+
+    @Test
     fun defaultLunchAndParisDinnerCanReachFortyFiveTogether() {
         val lunch = calculateReceiptReimbursableAmount(
             receiptAmount = BigDecimal("30.00"),
@@ -85,6 +147,28 @@ class ExpenseTypeTest {
         )
 
         assertEquals(BigDecimal("45.00"), allowance)
+    }
+
+    @Test
+    fun dailyAllowanceUsesAConfiguredLimitEvenWhenItIsBelowTheZoneDefault() {
+        val allowance = calculateDailyMealAllowance(
+            baseAllowance = BigDecimal("45.00"),
+            mealTypes = listOf(ExpenseType.LUNCH_DINNER_PARIS),
+            customLimits = mapOf(ExpenseType.LUNCH_DINNER_PARIS to BigDecimal("35.00"))
+        )
+
+        assertEquals(BigDecimal("35.00"), allowance)
+    }
+
+    @Test
+    fun dailyAllowanceUsesCustomLunchLimitInsteadOfZoneDefault() {
+        val allowance = calculateDailyMealAllowance(
+            baseAllowance = BigDecimal("45.00"),
+            mealTypes = listOf(ExpenseType.LUNCH),
+            customLimits = mapOf(ExpenseType.LUNCH to BigDecimal("16.00"))
+        )
+
+        assertEquals(BigDecimal("16.00"), allowance)
     }
 
     @Test
@@ -187,6 +271,18 @@ class ExpenseTypeTest {
         )
 
         assertEquals(BigDecimal("12.00"), reimbursableBase)
+    }
+
+    @Test
+    fun zeroEmployerContributionDoesNotDeductAnything() {
+        val reimbursableBase = applyMealVoucherEmployerContribution(
+            receiptAmount = BigDecimal("18.00"),
+            expenseType = ExpenseType.LUNCH,
+            employerContribution = BigDecimal.ZERO,
+            contributionAlreadyApplied = false
+        )
+
+        assertEquals(BigDecimal("18.00"), reimbursableBase)
     }
 
     @Test
@@ -367,5 +463,380 @@ class ExpenseTypeTest {
         assertEquals(BigDecimal("55.00"), groups.single().declaredAmount)
         assertEquals(BigDecimal("45.00"), groups.single().reimbursableAmount)
         assertTrue(groups.single().isCapped)
+    }
+
+    @Test
+    fun submissionConvertsAnOverLimitDinnerWithoutLunchAndRecalculatesItsMark() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            id = "dinner",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("60.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf",
+            reimbursableAmount = BigDecimal("25.00")
+        )
+
+        val converted = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap()
+        ).single()
+        val calculation = calculateReceiptReimbursement(
+            amount = converted.amount,
+            expenseType = converted.expenseType,
+            trip = trip,
+            date = date,
+            previousReceipts = emptyList(),
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(ExpenseType.LUNCH_DINNER_PARIS, converted.expenseType)
+        assertEquals("dinner.pdf", converted.storedFileName)
+        assertEquals(BigDecimal("6.00"), calculation.employerContributionDeducted)
+        assertEquals(BigDecimal("45.00"), calculation.quota)
+        assertEquals(BigDecimal("45.00"), calculation.reimbursableAmount)
+        assertTrue(calculation.isQuotaLimited)
+        assertEquals(3, calculation.annotationDetailLines().size)
+    }
+
+    @Test
+    fun zeroEmployerContributionAddsNoDeductionOrMarkAfterDinnerConversion() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+        val converted = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap()
+        ).single()
+
+        val calculation = calculateReceiptReimbursement(
+            amount = converted.amount,
+            expenseType = converted.expenseType,
+            trip = trip,
+            date = date,
+            previousReceipts = emptyList(),
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal.ZERO
+        )
+
+        assertEquals(ExpenseType.LUNCH_DINNER_PARIS, converted.expenseType)
+        assertEquals(BigDecimal("30.00"), calculation.reimbursableAmount)
+        assertEquals(BigDecimal.ZERO, calculation.employerContributionDeducted)
+        assertEquals(emptyList<String>(), calculation.annotationDetailLines())
+    }
+
+    @Test
+    fun submissionUsesMealAllowanceWhenItBeatsConvertedDinner() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+        val dinnerConverted = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap()
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = dinnerConverted,
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(ExpenseType.MEAL_ALLOWANCE_PARIS, optimized.single().expenseType)
+    }
+
+    @Test
+    fun submissionKeepsCombinedDinnerWhenZeroContributionMakesItMoreAdvantageous() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+        val dinnerConverted = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap()
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = dinnerConverted,
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal.ZERO
+        )
+
+        assertEquals(ExpenseType.LUNCH_DINNER_PARIS, optimized.single().expenseType)
+    }
+
+    @Test
+    fun customMealAllowanceIsIncludedInSubmissionComparison() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("55.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_COUNTRY,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+        val customLimits = mapOf(
+            ExpenseType.MEAL_ALLOWANCE_COUNTRY to BigDecimal("48.00")
+        )
+        val dinnerConverted = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = customLimits
+        )
+
+        val optimized = convertToMoreAdvantageousMealAllowance(
+            receipts = dinnerConverted,
+            trip = trip,
+            customLimits = customLimits,
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(ExpenseType.MEAL_ALLOWANCE_COUNTRY, optimized.single().expenseType)
+    }
+
+    @Test
+    fun singleLunchKeepsItsReceiptAndAddsMissingDinnerAllowanceWhenBetter() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val lunch = Receipt(
+            id = "lunch",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("30.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.LUNCH,
+            storedFileName = "lunch.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val optimized = applySingleMealAllowanceStrategy(
+            receipts = listOf(lunch),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(2, optimized.size)
+        assertEquals(ExpenseType.LUNCH, optimized.first().expenseType)
+        val allowance = optimized.single { it.generatedMealAllowance }
+        assertEquals(ExpenseType.MEAL_ALLOWANCE_PARIS, allowance.expenseType)
+        assertEquals(BigDecimal("25.00"), allowance.amount)
+        assertTrue(allowance.comment.contains("Dinner manquant"))
+        assertEquals(false, allowance.hasAttachment)
+    }
+
+    @Test
+    fun singleDinnerAddsMissingLunchAllowanceWhenThatCombinationIsBetter() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val dinner = Receipt(
+            id = "dinner",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("45.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_COUNTRY,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val optimized = applySingleMealAllowanceStrategy(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = emptyMap(),
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(2, optimized.size)
+        assertEquals(ExpenseType.DINNER_COUNTRY, optimized.first().expenseType)
+        assertTrue(
+            optimized.single { it.generatedMealAllowance }
+                .comment.contains("Lunch manquant")
+        )
+    }
+
+    @Test
+    fun singleMealUsesLunchDinnerWhenItIsMoreAdvantageousThanMissingAllowance() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val dinner = Receipt(
+            id = "dinner",
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("70.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_COUNTRY,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+        val customLimits = mapOf(
+            ExpenseType.LUNCH_DINNER_COUNTRY to BigDecimal("65.00"),
+            ExpenseType.MEAL_ALLOWANCE_COUNTRY to BigDecimal("10.00")
+        )
+
+        val optimized = applySingleMealAllowanceStrategy(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = customLimits,
+            mealVoucherEmployerContribution = BigDecimal("6.00")
+        )
+
+        assertEquals(1, optimized.size)
+        assertEquals(ExpenseType.LUNCH_DINNER_COUNTRY, optimized.single().expenseType)
+        assertEquals(false, optimized.single().generatedMealAllowance)
+    }
+
+    @Test
+    fun submissionKeepsDinnerWhenItDoesNotExceedItsCustomLimit() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Paris",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PARIS_SOPHIA
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("35.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_PARIS,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val result = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(dinner),
+            trip = trip,
+            customLimits = mapOf(ExpenseType.DINNER_PARIS to BigDecimal("35.00"))
+        )
+
+        assertEquals(ExpenseType.DINNER_PARIS, result.single().expenseType)
+    }
+
+    @Test
+    fun submissionDoesNotConvertDinnerWhenLunchExists() {
+        val date = LocalDate.of(2026, 10, 22)
+        val trip = Trip(
+            id = "trip",
+            name = "Province",
+            startDate = date,
+            endDate = date,
+            mealZone = MealZone.PROVINCE
+        )
+        val lunch = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("12.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.LUNCH,
+            storedFileName = "lunch.pdf",
+            mimeType = "application/pdf"
+        )
+        val dinner = Receipt(
+            tripId = trip.id,
+            date = date,
+            amount = BigDecimal("45.00"),
+            category = ExpenseCategory.MEAL,
+            expenseType = ExpenseType.DINNER_COUNTRY,
+            storedFileName = "dinner.pdf",
+            mimeType = "application/pdf"
+        )
+
+        val result = convertOverLimitDinnerOnlyDays(
+            receipts = listOf(lunch, dinner),
+            trip = trip,
+            customLimits = emptyMap()
+        )
+
+        assertEquals(
+            listOf(ExpenseType.LUNCH, ExpenseType.DINNER_COUNTRY),
+            result.map { it.expenseType }
+        )
     }
 }

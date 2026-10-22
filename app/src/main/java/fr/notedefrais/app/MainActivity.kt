@@ -119,6 +119,7 @@ import fr.notedefrais.app.data.isCombinedMealCalculationBeneficial
 import fr.notedefrais.app.data.isDinner
 import fr.notedefrais.app.data.isLunch
 import fr.notedefrais.app.data.isLunchDinner
+import fr.notedefrais.app.data.isMealAllowance
 import fr.notedefrais.app.data.isStructuredMeal
 import fr.notedefrais.app.data.lunchDinnerType
 import fr.notedefrais.app.data.receivesMealVoucherDeduction
@@ -239,6 +240,7 @@ private fun ExpenseApp(vm: ExpenseViewModel = viewModel()) {
             onTripClick = { selectedTripId = it.id },
             onCreateTrip = vm::createTrip,
             onOpenSettings = { showSettings = true },
+            onPrepareTripForSubmission = vm::prepareTripForSubmission,
             onUpdateTripTracking = vm::updateTripTracking,
             onUpdateTripMealZone = vm::updateTripMealZone,
             onDeleteTrip = vm::deleteTrip,
@@ -255,6 +257,7 @@ private fun ExpenseApp(vm: ExpenseViewModel = viewModel()) {
             onAddReceipt = vm::addReceipt,
             onUpdateReceipt = vm::updateReceipt,
             onDeleteReceipt = vm::deleteReceipt,
+            onPrepareTripForSubmission = vm::prepareTripForSubmission,
             fileFor = vm::fileFor
         )
     }
@@ -293,6 +296,7 @@ private fun TripsScreen(
     onTripClick: (Trip) -> Unit,
     onCreateTrip: (String, LocalDate, LocalDate, MealZone) -> Result<Unit>,
     onOpenSettings: () -> Unit,
+    onPrepareTripForSubmission: (String) -> Result<List<Receipt>>,
     onUpdateTripTracking: (String, TripStatus, LocalDate?) -> Result<Unit>,
     onUpdateTripMealZone: (String, MealZone) -> Result<Unit>,
     onDeleteTrip: (String) -> Result<Unit>,
@@ -354,7 +358,22 @@ private fun TripsScreen(
                         onLocation = { tripToRelocate = trip },
                         onDelete = { tripToDelete = trip },
                         onExport = {
-                            exportTripByEmail(context, trip, tripReceipts, fileFor)
+                            onPrepareTripForSubmission(trip.id)
+                                .onSuccess { preparedReceipts ->
+                                    exportTripByEmail(
+                                        context,
+                                        trip,
+                                        preparedReceipts,
+                                        fileFor
+                                    )
+                                }
+                                .onFailure { error ->
+                                    Toast.makeText(
+                                        context,
+                                        error.message ?: "Préparation de l’export impossible",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
                         }
                     )
                 }
@@ -569,7 +588,8 @@ private fun ExpenseSettingsScreen(
                             supportingText = {
                                 Text(
                                     "Déduite du premier lunch ou du premier " +
-                                        "lunch + dinner de chaque journée. Par défaut : 6,00 €."
+                                        "lunch + dinner de chaque journée. " +
+                                        "Saisissez 0 pour la désactiver. Par défaut : 6,00 €."
                                 )
                             },
                             singleLine = true,
@@ -615,7 +635,10 @@ private fun ExpenseSettingsScreen(
                             placeholder = { Text("Valeur par défaut") },
                             supportingText = {
                                 Text(
-                                    if (type.defaultLimit != null) {
+                                    if (type.isMealAllowance) {
+                                        "Par défaut : ${type.defaultLimit!!.euros()}. " +
+                                            "Comparé automatiquement aux repas lors de l’envoi."
+                                    } else if (type.defaultLimit != null) {
                                         "Par défaut : ${type.defaultLimit!!.euros()}"
                                     } else if (type.category == ExpenseCategory.MEAL) {
                                         "Par défaut : plafond repas quotidien du déplacement"
@@ -727,7 +750,11 @@ private fun TripCard(
             HorizontalDivider(color = Color(0xFFE9ECE7))
             Spacer(Modifier.height(12.dp))
             Row {
-                Text("${receipts.size} justificatif${if (receipts.size > 1) "s" else ""}", fontSize = 13.sp)
+                val attachmentCount = receipts.count { it.hasAttachment }
+                Text(
+                    "$attachmentCount justificatif${if (attachmentCount > 1) "s" else ""}",
+                    fontSize = 13.sp
+                )
                 Spacer(Modifier.weight(1f))
                 Text(
                     "${trip.mealZone.label} • ${trip.dailyMealAllowance.euros()} / jour",
@@ -795,6 +822,7 @@ private fun TripScreen(
     onAddReceipt: (Uri, Trip, LocalDate, BigDecimal, ExpenseType, String, String, Boolean) -> Result<Unit>,
     onUpdateReceipt: (Receipt, Trip, LocalDate, BigDecimal, ExpenseType, String, Boolean) -> Result<Unit>,
     onDeleteReceipt: (Receipt) -> Unit,
+    onPrepareTripForSubmission: (String) -> Result<List<Receipt>>,
     fileFor: (Receipt) -> File
 ) {
     val context = LocalContext.current
@@ -892,7 +920,24 @@ private fun TripScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { exportTripByEmail(context, trip, receipts, fileFor) },
+                        onClick = {
+                            onPrepareTripForSubmission(trip.id)
+                                .onSuccess { preparedReceipts ->
+                                    exportTripByEmail(
+                                        context,
+                                        trip,
+                                        preparedReceipts,
+                                        fileFor
+                                    )
+                                }
+                                .onFailure { error ->
+                                    Toast.makeText(
+                                        context,
+                                        error.message ?: "Préparation de l’export impossible",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
                         enabled = receipts.isNotEmpty()
                     ) {
                         Icon(Icons.Default.Email, contentDescription = "Exporter par e-mail")
@@ -912,7 +957,7 @@ private fun TripScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
-                TripOverview(trip, summaries, receipts)
+                TripOverview(summaries, receipts)
             }
             items(summaries, key = { it.date.toString() }) { summary ->
                 DayCard(
@@ -1024,10 +1069,10 @@ private fun TripScreen(
 }
 
 @Composable
-private fun TripOverview(trip: Trip, summaries: List<DailySummary>, receipts: List<Receipt>) {
+private fun TripOverview(summaries: List<DailySummary>, receipts: List<Receipt>) {
     val total = receipts.fold(BigDecimal.ZERO) { sum, receipt -> sum + receipt.amount }
     val meals = summaries.fold(BigDecimal.ZERO) { sum, day -> sum + day.mealSpent }
-    val allowance = trip.dailyMealAllowance * summaries.size.toBigDecimal()
+    val allowance = summaries.fold(BigDecimal.ZERO) { sum, day -> sum + day.allowance }
     Card(
         colors = CardDefaults.cardColors(containerColor = FoNavy),
         shape = RoundedCornerShape(22.dp),
@@ -1042,7 +1087,11 @@ private fun TripOverview(trip: Trip, summaries: List<DailySummary>, receipts: Li
             Row {
                 OverviewStat("Repas", meals.euros(), Modifier.weight(1f))
                 OverviewStat("Droits repas", allowance.euros(), Modifier.weight(1f))
-                OverviewStat("Pièces", receipts.size.toString(), Modifier.weight(1f))
+                OverviewStat(
+                    "Pièces",
+                    receipts.count { it.hasAttachment }.toString(),
+                    Modifier.weight(1f)
+                )
             }
         }
     }
@@ -1242,13 +1291,19 @@ private fun ReceiptRow(
     onDelete: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = receipt.hasAttachment, onClick = onOpen)
+            .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
             color = categoryColor(receipt.category),
             shape = RoundedCornerShape(10.dp),
-            modifier = Modifier.clickable(onClick = onEdit)
+            modifier = Modifier.clickable(
+                enabled = receipt.hasAttachment,
+                onClick = onEdit
+            )
         ) {
             Icon(
                 categoryIcon(receipt.category),
@@ -1270,7 +1325,11 @@ private fun ReceiptRow(
                 )
             }
             Text(
-                receipt.storedFileName,
+                if (receipt.hasAttachment) {
+                    receipt.storedFileName
+                } else {
+                    "Ajout automatique • sans justificatif"
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 fontSize = 12.sp,
@@ -1291,8 +1350,14 @@ private fun ReceiptRow(
                 )
             }
         }
-        IconButton(onClick = onDelete) {
-            Icon(Icons.Default.DeleteOutline, contentDescription = "Supprimer", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (receipt.hasAttachment) {
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Default.DeleteOutline,
+                    contentDescription = "Supprimer",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
@@ -1742,6 +1807,7 @@ private fun AddReceiptDialog(
                         it.expenseType.receivesMealVoucherDeduction
                 }
                 if (
+                    mealVoucherEmployerContribution.signum() > 0 &&
                     expenseType.receivesMealVoucherDeduction &&
                     !employerContributionAlreadyApplied
                 ) {
@@ -1922,6 +1988,7 @@ private fun EditReceiptDialog(
                         it.expenseType.receivesMealVoucherDeduction
                 }
                 if (
+                    mealVoucherEmployerContribution.signum() > 0 &&
                     expenseType.receivesMealVoucherDeduction &&
                     !employerContributionAlreadyApplied
                 ) {

@@ -11,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import fr.notedefrais.app.data.ExpenseCategory
 import fr.notedefrais.app.data.ExpenseType
 import fr.notedefrais.app.data.Receipt
 import fr.notedefrais.app.data.Trip
@@ -22,6 +23,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.text.Normalizer
 import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
@@ -46,12 +48,16 @@ object TripEmailExporter {
 
         val sortedReceipts = sortReceiptsForExport(receipts)
         val attachmentNames = buildAttachmentNames(sortedReceipts)
-        val exportLines = buildExportLines(sortedReceipts, attachmentNames)
+        val exportLines = buildExportLines(
+            sortedReceipts,
+            attachmentNames,
+            hotelItemCount = trip.inclusiveDayCount()
+        )
         val exportDirectory = File(context.cacheDir, "exports/${trip.id}").apply {
             deleteRecursively()
             mkdirs()
         }
-        val exportedFiles = sortedReceipts.map { receipt ->
+        val exportedFiles = sortedReceipts.filter { it.hasAttachment }.map { receipt ->
             val source = sourceFile(receipt)
             require(source.exists()) {
                 "Le justificatif ${receipt.expenseType.displayLabel} du ${receipt.date} est introuvable."
@@ -124,16 +130,18 @@ internal fun sortReceiptsForExport(receipts: List<Receipt>): List<Receipt> =
             { it.date },
             { it.expenseType.code.toIntOrNull() ?: Int.MAX_VALUE },
             { it.expenseType.code },
-            { it.expenseType.exportMealOrder() },
+            { it.exportMealOrder() },
             { it.expenseType.label.lowercase(Locale.FRANCE) },
             { it.id }
         )
     )
 
-private fun ExpenseType.exportMealOrder(): Int = when {
-    this == ExpenseType.LUNCH || this == ExpenseType.LUNCH_DRINK -> 10
-    isLunchDinner -> 20
-    isDinner || this == ExpenseType.DINNER_DRINK -> 30
+private fun Receipt.exportMealOrder(): Int = when {
+    generatedMealAllowance && comment.contains("Lunch manquant") -> 10
+    expenseType == ExpenseType.LUNCH || expenseType == ExpenseType.LUNCH_DRINK -> 10
+    expenseType.isLunchDinner -> 20
+    generatedMealAllowance && comment.contains("Dinner manquant") -> 30
+    expenseType.isDinner || expenseType == ExpenseType.DINNER_DRINK -> 30
     else -> 0
 }
 
@@ -154,7 +162,7 @@ internal fun buildAttachmentNames(receipts: List<Receipt>): Map<String, String> 
 
     val occurrences = mutableMapOf<Int, Int>()
     return buildMap {
-        sorted.forEach { receipt ->
+        sorted.filter { it.hasAttachment }.forEach { receipt ->
             val position = linePositions.getValue(receipt.id)
             val lineDescription = if (receipt.expenseType.isLunchDinner) {
                 sorted
@@ -285,15 +293,18 @@ internal data class ExportLine(
     val amount: BigDecimal,
     val reimbursableAmount: BigDecimal,
     val description: String,
-    val attachmentNames: List<String>
+    val attachmentNames: List<String>,
+    val itemCount: Int = 1
 ) {
     val isCapped: Boolean get() = reimbursableAmount < amount
 }
 
 internal fun buildExportLines(
     receipts: List<Receipt>,
-    attachmentNames: Map<String, String>
+    attachmentNames: Map<String, String>,
+    hotelItemCount: Int = 1
 ): List<ExportLine> {
+    val safeHotelItemCount = hotelItemCount.coerceAtLeast(1)
     val sorted = sortReceiptsForExport(receipts)
     val emittedCumulatedDates = mutableSetOf<LocalDate>()
     return buildList {
@@ -313,7 +324,12 @@ internal fun buildExportLines(
                             .map { it.exportDescription() }
                             .distinct()
                             .joinToString(" / "),
-                        attachmentNames = cumulated.map { attachmentNames.getValue(it.id) }
+                        attachmentNames = cumulated.mapNotNull { attachmentNames[it.id] },
+                        itemCount = if (receipt.expenseType.category == ExpenseCategory.HOTEL) {
+                            safeHotelItemCount
+                        } else {
+                            1
+                        }
                     )
                 )
             } else {
@@ -324,7 +340,12 @@ internal fun buildExportLines(
                         amount = receipt.amount,
                         reimbursableAmount = receipt.reimbursableAmount,
                         description = receipt.exportDescription(),
-                        attachmentNames = listOf(attachmentNames.getValue(receipt.id))
+                        attachmentNames = listOfNotNull(attachmentNames[receipt.id]),
+                        itemCount = if (receipt.expenseType.category == ExpenseCategory.HOTEL) {
+                            safeHotelItemCount
+                        } else {
+                            1
+                        }
                     )
                 )
             }
@@ -375,7 +396,7 @@ internal fun buildCsv(
     appendLine("Statut;${trip.status.label.toCsvCell()}")
     trip.submittedDate?.let { appendLine("Date de soumission;$it") }
     appendLine()
-    appendLine("Date;Code;Libellé;Montant TTC;Montant remboursable;Commentaire / Description;Pièce jointe")
+    appendLine("Date;Code;Libellé;Nombre d'items;Montant TTC;Montant remboursable;Commentaire / Description;Pièce jointe")
     var previousDate = lines.firstOrNull()?.date
     lines.forEach { line ->
         if (previousDate != null && line.date != previousDate) appendLine()
@@ -384,6 +405,7 @@ internal fun buildCsv(
                 line.date.toString(),
                 line.expenseType.code,
                 line.expenseType.label.toCsvCell(),
+                line.itemCount.toString(),
                 line.amount.toFrenchNumber(),
                 line.reimbursableAmount.toFrenchNumber(),
                 line.description.toCsvCell(),
@@ -393,6 +415,12 @@ internal fun buildCsv(
         previousDate = line.date
     }
 }
+
+internal fun Trip.inclusiveDayCount(): Int =
+    (ChronoUnit.DAYS.between(startDate, endDate) + 1L)
+        .coerceAtLeast(1L)
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+        .toInt()
 
 private fun Receipt.exportDescription(): String =
     comment.trim().ifBlank { "${expenseType.displayLabel} — $date" }

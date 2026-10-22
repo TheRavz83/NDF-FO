@@ -42,6 +42,20 @@ test("les repas cumulés identiques sont fusionnés", () => {
   assert.equal(combined.reimbursableAmount, 44.82);
 });
 
+test("le mail calcule la durée de l'hôtel sur la période inclusive", () => {
+  const email = `Bonjour,
+Veuillez trouver l’export Fo Notes du déplacement « Paris ».
+Période : du 2026-07-21 au 2026-07-23
+
+Jeudi 23 juillet 2026
+• 07 Hotel Paris / Sophia — 450,00 €
+`;
+
+  const result = parser.parseEmail(email);
+
+  assert.equal(result.entries[0].itemCount, 3);
+});
+
 test("le montant remboursable et le commentaire sont prioritaires", () => {
   const result = parser.parseEmail(sampleEmail);
   const dinner = result.entries.find((entry) => entry.label === "06 Dinner Paris");
@@ -70,8 +84,23 @@ Date;Code;Libell\u00e9;Montant TTC;Montant remboursable;Commentaire / Descriptio
     amount: 29.95,
     reimbursableAmount: 29.95,
     description: "Gare vers client",
+    itemCount: 1,
     attachments: ["02_Taxi_2026-07-21.pdf"]
   });
+});
+
+test("le CSV transmet le nombre de jours d'une facture d'hôtel", () => {
+  const csv = `\uFEFFDéplacement;Paris
+Début;2026-07-21
+Fin;2026-07-23
+
+Date;Code;Libellé;Nombre d'items;Montant TTC;Montant remboursable;Commentaire / Description;Pièce jointe
+2026-07-23;07;Hotel Île-de-France / Sophia / Lyon / Aix / Marseille / Bordeaux;3;450,00;450,00;Hôtel Paris;hotel.pdf
+`;
+
+  const result = parser.parseCsv(csv);
+
+  assert.equal(result.entries[0].itemCount, 3);
 });
 
 test("les cellules CSV contenant un point-virgule sont reconnues", () => {
