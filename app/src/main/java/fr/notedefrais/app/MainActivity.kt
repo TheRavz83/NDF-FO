@@ -86,6 +86,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -1790,6 +1791,68 @@ private fun SourceDialog(
     )
 }
 
+@Composable
+private fun RouteAddressField(
+    value: String,
+    place: fr.notedefrais.app.remote.RoutePlace?,
+    label: String,
+    enabled: Boolean,
+    onChange: (String, fr.notedefrais.app.remote.RoutePlace?) -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    var suggestions by remember { mutableStateOf<List<fr.notedefrais.app.remote.RoutePlace>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(value, place, focused, enabled) {
+        suggestions = emptyList()
+        searchError = null
+        searching = false
+        if (!focused || !enabled || place != null || value.trim().length < 3) return@LaunchedEffect
+        kotlinx.coroutines.delay(600)
+        searching = true
+        try {
+            suggestions = RouteDistance.searchPlaces(value)
+            if (suggestions.isEmpty()) searchError = "Aucune adresse trouvée."
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            searchError = "Recherche indisponible. Réessayez ou saisissez une adresse complète."
+        } finally {
+            searching = false
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { onChange(it, null) },
+            label = { Text(label) },
+            enabled = enabled,
+            singleLine = true,
+            trailingIcon = if (searching) {
+                { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) }
+            } else null,
+            modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }
+        )
+        if (focused && enabled && place == null) {
+            suggestions.forEach { suggestion ->
+                TextButton(
+                    onClick = {
+                        suggestions = emptyList()
+                        onChange(suggestion.label, suggestion)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(suggestion.label, modifier = Modifier.fillMaxWidth())
+                }
+            }
+            searchError?.let { Text(it, fontSize = 12.sp) }
+            if (suggestions.isNotEmpty()) {
+                Text("Photon · © OpenStreetMap contributors", fontSize = 11.sp)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MileageTripSection(onResult: (String?, String) -> Unit) {
@@ -1798,6 +1861,10 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
     var outTo by remember { mutableStateOf("") }
     var backFrom by remember { mutableStateOf("") }
     var backTo by remember { mutableStateOf("") }
+    var outFromPlace by remember { mutableStateOf<fr.notedefrais.app.remote.RoutePlace?>(null) }
+    var outToPlace by remember { mutableStateOf<fr.notedefrais.app.remote.RoutePlace?>(null) }
+    var backFromPlace by remember { mutableStateOf<fr.notedefrais.app.remote.RoutePlace?>(null) }
+    var backToPlace by remember { mutableStateOf<fr.notedefrais.app.remote.RoutePlace?>(null) }
     var backEdited by remember { mutableStateOf(false) }
     var horsepower by remember { mutableStateOf(FiscalHorsepower.THREE_OR_LESS) }
     var horsepowerExpanded by remember { mutableStateOf(false) }
@@ -1818,40 +1885,60 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Trajet kilométrique", fontWeight = FontWeight.SemiBold, color = FoRed)
         Text("Aller", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        OutlinedTextField(
+        RouteAddressField(
             value = outFrom,
-            onValueChange = {
-                outFrom = it
-                if (!backEdited) backTo = it
+            place = outFromPlace,
+            enabled = !loading,
+            onChange = { text, selected ->
+                outFrom = text
+                outFromPlace = selected
+                route = null
+                if (!backEdited) {
+                    backTo = text
+                    backToPlace = selected
+                }
             },
-            label = { Text("Départ aller (ex. Atos Aix)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            label = "Départ aller (ex. Atos Aix)"
         )
-        OutlinedTextField(
+        RouteAddressField(
             value = outTo,
-            onValueChange = {
-                outTo = it
-                if (!backEdited) backFrom = it
+            place = outToPlace,
+            enabled = !loading,
+            onChange = { text, selected ->
+                outTo = text
+                outToPlace = selected
+                route = null
+                if (!backEdited) {
+                    backFrom = text
+                    backFromPlace = selected
+                }
             },
-            label = { Text("Arrivée aller (ex. Gare TGV Aix)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            label = "Arrivée aller (ex. Gare TGV Aix)"
         )
         Text("Retour", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        OutlinedTextField(
+        RouteAddressField(
             value = backFrom,
-            onValueChange = { backFrom = it; backEdited = true },
-            label = { Text("Départ retour (ex. Gare TGV Aix)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            place = backFromPlace,
+            enabled = !loading,
+            onChange = { text, selected ->
+                backFrom = text
+                backFromPlace = selected
+                backEdited = true
+                route = null
+            },
+            label = "Départ retour (ex. Gare TGV Aix)"
         )
-        OutlinedTextField(
+        RouteAddressField(
             value = backTo,
-            onValueChange = { backTo = it; backEdited = true },
-            label = { Text("Arrivée retour (ex. Atos Aix)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            place = backToPlace,
+            enabled = !loading,
+            onChange = { text, selected ->
+                backTo = text
+                backToPlace = selected
+                backEdited = true
+                route = null
+            },
+            label = "Arrivée retour (ex. Atos Aix)"
         )
         ExposedDropdownMenuBox(
             expanded = horsepowerExpanded,
@@ -1910,8 +1997,12 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
                 loading = true
                 scope.launch {
                     runCatching {
-                        val outward = RouteDistance.kilometers(places[0], places[1])
-                        val inward = RouteDistance.kilometers(places[2], places[3])
+                        val outward = RouteDistance.kilometers(
+                            places[0], places[1], outFromPlace, outToPlace
+                        )
+                        val inward = RouteDistance.kilometers(
+                            places[2], places[3], backFromPlace, backToPlace
+                        )
                         outward to inward
                     }.onSuccess { (outward, inward) ->
                         val labels = "${places[0]} → ${places[1]} ; ${places[2]} → ${places[3]} :"
