@@ -1868,17 +1868,21 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
     var backEdited by remember { mutableStateOf(false) }
     var horsepower by remember { mutableStateOf(FiscalHorsepower.THREE_OR_LESS) }
     var horsepowerExpanded by remember { mutableStateOf(false) }
-    var route by remember { mutableStateOf<Triple<String, BigDecimal, BigDecimal>?>(null) }
+    var route by remember { mutableStateOf<Pair<BigDecimal, BigDecimal>?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    fun publish(places: String, outward: BigDecimal, inward: BigDecimal, power: FiscalHorsepower) {
+    fun publish(outward: BigDecimal, inward: BigDecimal, power: FiscalHorsepower) {
         val total = outward + inward
+        val reimbursement = power.amountFor(total).toFrenchAmount()
+        val rate = power.ratePerKm.toPlainString().replace('.', ',')
         onResult(
-            power.amountFor(total).toFrenchAmount(),
-            "$places ${outward.toFrenchAmount()} km + ${inward.toFrenchAmount()} km = " +
-                "${total.toFrenchAmount()} km ; ${power.label}, " +
-                "${power.ratePerKm.toPlainString().replace('.', ',')} €/km"
+            reimbursement,
+            "Distance aller : ${outward.toFrenchAmount()} Km\n" +
+                "Distance retour : ${inward.toFrenchAmount()} Km\n" +
+                "Distance totale : ${total.toFrenchAmount()} Km\n" +
+                "Puissance fiscale : ${power.label}\n" +
+                "Calcul : ${total.toFrenchAmount()} Km x $rate €/km = $reimbursement €"
         )
     }
 
@@ -1975,8 +1979,8 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
                         onClick = {
                             horsepower = power
                             horsepowerExpanded = false
-                            route?.let { (places, outward, inward) ->
-                                publish(places, outward, inward, power)
+                            route?.let { (outward, inward) ->
+                                publish(outward, inward, power)
                             }
                         }
                     )
@@ -2005,9 +2009,8 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
                         )
                         outward to inward
                     }.onSuccess { (outward, inward) ->
-                        val labels = "${places[0]} → ${places[1]} ; ${places[2]} → ${places[3]} :"
-                        route = Triple(labels, outward, inward)
-                        publish(labels, outward, inward, horsepower)
+                        route = outward to inward
+                        publish(outward, inward, horsepower)
                     }.onFailure {
                         error = it.message ?: "Calcul impossible. Vérifiez la connexion."
                     }
@@ -2021,7 +2024,7 @@ private fun MileageTripSection(onResult: (String?, String) -> Unit) {
             }
             Text(if (loading) "Calcul en cours…" else "Calculer les kilomètres")
         }
-        route?.let { (_, outward, inward) ->
+        route?.let { (outward, inward) ->
             Text(
                 "Aller ${outward.toFrenchAmount()} km + retour ${inward.toFrenchAmount()} km = " +
                     "${(outward + inward).toFrenchAmount()} km",
